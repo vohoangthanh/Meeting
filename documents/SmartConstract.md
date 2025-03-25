@@ -1,4 +1,4 @@
-## Tài liệu: Hợp đồng thông minh cho DApp Meeting với WebRTC
+## Tài liệu: Smart Constract cho DApp Meeting với WebRTC
 
 ### Phân tích yêu cầu
 Yêu cầu xây dựng một hợp đồng thông minh để quản lý phòng họp cho DApp sử dụng WebRTC, với các đặc điểm sau:
