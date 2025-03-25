@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Join Meeting Room</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Poppins', sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .app-container {
+            max-width: 500px;
+            width: 100%;
+            margin: 0 auto;
+        }
+
+        .join-form {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        h2 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 28px;
+            font-weight: 600;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+            position: relative;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e1e1e1;
+            border-radius: 12px;
+            font-size: 16px;
+            transition: all 0.3s ease;
+            background: white;
+        }
+
+        .form-group input:focus {
+            border-color: #667eea;
+            outline: none;
+            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 35px;
+        }
+
+        button {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .primary-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .secondary-btn {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        .primary-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .secondary-btn:hover {
+            background: #d5d5d5;
+        }
+
+        @media (max-width: 480px) {
+            .join-form {
+                padding: 30px 20px;
+            }
+
+            h2 {
+                font-size: 24px;
+            }
+
+            .form-group input {
+                padding: 12px;
+                font-size: 14px;
+            }
+
+            button {
+                padding: 12px;
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="app-container">
+        <div class="join-form">
+            <h2>Join Meeting</h2>
+            <div class="form-group">
+                <input type="text" id="usernameInput" placeholder="Enter your name" required>
+            </div>
+            <div class="form-group">
+                <input type="text" id="roomIdInput" placeholder="Enter Room ID" required>
+            </div>
+            <div class="button-group">
+                <button class="secondary-btn" onclick="window.location.href='index.html'">Back</button>
+                <button id="joinMeetingBtn" class="primary-btn">Join Meeting</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/webrtc-adapter/8.1.2/adapter.min.js"></script>
+    <script type="module">
+        import CloudflareCalls from './js/CloudflareCalls.js';
+
+        // Lấy current URL và cấu hình endpoints
+        const currentUrl = window.location.origin;
+        const isLocalhost = currentUrl.includes('localhost') || currentUrl.includes('127.0.0.1');
+
+        // Cấu hình endpoints dựa trên môi trường
+        const config = {
+            backendUrl: isLocalhost ? 'http://localhost:60000' : currentUrl,
+            websocketUrl: isLocalhost
+                ? 'ws://localhost:50000/ws'
+                : currentUrl.replace('http', 'ws').replace('https', 'wss') + '/ws',
+            backendUrl2: isLocalhost ? 'http://localhost:60000' : currentUrl,
+            websocketUrl2: isLocalhost
+                ? 'ws://localhost:60000/ws'
+                : currentUrl.replace('http', 'ws').replace('https', 'wss') + '/ws',
+        };
+        const baseAPI = isLocalhost ? 'http://localhost:60000' : currentUrl;
+        const calls = new CloudflareCalls(config);
+
+        const usernameInput = document.getElementById('usernameInput');
+        const roomIdInput = document.getElementById('roomIdInput');
+        const joinMeetingBtn = document.getElementById('joinMeetingBtn');
+        let isSubmit = false;
+
+        // Get token and initialize calls
+        async function ensureInitialized(username, cb) {
+            // if (!calls.token) {
+            console.log('Getting token...');
+            try {
+                sessionStorage.removeItem('token');
+                calls.inauthtoken(username, cb);
+            console.log('inauthtoken token...');
+                
+                // const response = await fetch(`${baseAPI}/auth/token`, {
+                //     method: 'POST',
+                //     headers: {
+                //         'Content-Type': 'application/json'
+                //     },
+                //     body: JSON.stringify({ username })
+                // });
+
+                // const { token } = await response.json();
+                // calls.setToken(token);
+                // return true;
+            } catch (err) {
+                console.error('Error getting token:', err);
+                alert('Failed to initialize. Please check if the server is running.');
+                return false;
+            }
+            // }
+            return true;
+        }
+
+        async function joinMeeting() {
+            if(isSubmit == true){
+                return;
+            }
+            const username = usernameInput.value.trim();
+            const roomId = roomIdInput.value.trim();
+            
+            if (!username || !roomId) {
+                alert('Please enter both your name and Room ID');
+                return;
+            }
+            isSubmit = true;
+            console.log('username :', username);
+            try {
+                // Initialize calls
+                await ensureInitialized(username, () => {
+                    console.log('done'); 
+                        localStorage.setItem('username', username);
+                        localStorage.setItem('roomId', roomId);
+
+                        // Redirect to device check page
+                        window.location.href = './check.html';
+                        return;
+                    
+                });
+
+            } catch (err) {
+                console.error('Error joining room:', err);
+                alert('Failed to join room: ' + err.message);
+            }
+        }
+
+        // Event Listeners
+        joinMeetingBtn.addEventListener('click', joinMeeting);
+
+        // Handle enter key
+        document.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                joinMeeting();
+            }
+        });
+    </script>
+</body>
+
+</html>
