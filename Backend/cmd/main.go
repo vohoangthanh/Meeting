@@ -4,24 +4,74 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/big"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	contract "dappmeetingnew/constract" // Update this import path to match your module
+	contract "dappmeetingnew/constract"
+	"dappmeetingnew/handle"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/joho/godotenv"
 )
 
-const (
-	// Update these values with your own configuration
-	ethereumNodeURL = "wss://bsc-testnet-rpc.publicnode.com"       // Use WebSocket endpoint for subscriptions
-	contractAddress = "0xEf497BdCD80Aaa420271F5D2eAd9C1E70c2930E0" // Replace with your deployed contract address
+// Configuration constants
+var (
+	ethereumNodeURL     string
+	contractAddress     string
+	cloudflareBaseURL   string
+	cloudflareAppID     string
+	cloudflareAppSecret string
 )
+
+func init() {
+	// Load environment variables
+	paths := []string{
+		".env",       // Current directory
+		"../.env",    // Parent directory
+		"../../.env", // Two levels up
+		"D:/DAppMeetingNew/backend/.env",
+	}
+
+	loaded := false
+	for _, path := range paths {
+		if err := godotenv.Load(path); err == nil {
+			loaded = true
+			log.Printf("Loaded environment from %s\n", path)
+			break
+		}
+	}
+
+	if !loaded {
+		log.Println("Warning: No .env file found. Using default or environment values.")
+	}
+
+	// Load configurations with fallback to defaults
+	ethereumNodeURL = getEnv("ETHEREUM_NODE_URL", "wss://bsc-testnet-rpc.publicnode.com")
+	contractAddress = getEnv("CONTRACT_ADDRESS", "0xEf497BdCD80Aaa420271F5D2eAd9C1E70c2930E0")
+	cloudflareBaseURL = getEnv("CLOUDFLARE_BASE_URL", "https://rtc.live.cloudflare.com/v1/apps")
+	cloudflareAppID = getEnv("CLOUDFLARE_APP_ID", "977c39eac9a8fc03a471d7da6a7d66e0")
+	cloudflareAppSecret = getEnv("CLOUDFLARE_APP_SECRET", "f069115dbeb5847040e7dbb7f9c79772fa923534fe1f74e3a62d54561aa12118")
+
+	log.Printf("Ethereum Node URL: %s\n", ethereumNodeURL)
+	log.Printf("Contract Address: %s\n", contractAddress)
+	log.Printf("Cloudflare Base URL: %s\n", cloudflareBaseURL)
+
+	if cloudflareAppID == "" || cloudflareAppSecret == "" {
+		log.Println("Warning: Cloudflare credentials not set. Please check your environment variables.")
+	}
+}
+
+func getEnv(key, fallback string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
 
 func main() {
 	// Connect to Ethereum node
@@ -30,15 +80,31 @@ func main() {
 		log.Fatalf("Failed to connect to the Ethereum network: %v", err)
 	}
 	defer client.Close()
-	fmt.Println("Connected to Ethereum node")
+	fmt.Println("Connected to Ethereum node:", ethereumNodeURL)
 
 	// Create a new instance of the contract binding
 	address := common.HexToAddress(contractAddress)
-	instance, err := contract.NewContract(address, client)
+	contractInstance, err := contract.NewContract(address, client)
 	if err != nil {
 		log.Fatalf("Failed to instantiate contract: %v", err)
 	}
-	fmt.Println("Contract instance created")
+	fmt.Println("Contract instance created at address:", contractAddress)
+
+	// Initialize Cloudflare service
+	cloudflareService := handle.NewCloudflareService(cloudflareBaseURL, cloudflareAppID, cloudflareAppSecret)
+	fmt.Println("Cloudflare service initialized")
+
+	// Initialize SMCallManager for transaction handling
+	smCallManager, err := handle.NewSMCallManager(client, address)
+	if err != nil {
+		log.Fatalf("Failed to initialize SM Call Manager: %v", err)
+	}
+	defer smCallManager.Close()
+	fmt.Println("SM Call Manager initialized")
+
+	// Initialize EventHandler
+	eventHandler := handle.NewEventHandler(contractInstance, cloudflareService, smCallManager)
+	fmt.Println("Event Handler initialized")
 
 	// Create a context that can be canceled
 	ctx, cancel := context.WithCancel(context.Background())
@@ -55,48 +121,41 @@ func main() {
 	eventToBackendCh := make(chan *contract.ContractEventForwardedToBackend)
 	eventToFrontendCh := make(chan *contract.ContractEventForwardedToFrontend)
 
-	// Create filter options (from latest block onwards)
-	// filterOpts := &bind.FilterOpts{
-	// 	Start:   0, // Filter from latest block
-	// 	End:     nil,
-	// 	Context: ctx,
-	// }
-
 	// Create watch options
 	watchOpts := &bind.WatchOpts{
 		Context: ctx,
 	}
 
 	// Start watching for ParticipantJoined events
-	participantJoinedSub, err := instance.WatchParticipantJoined(watchOpts, participantJoinedCh)
+	participantJoinedSub, err := contractInstance.WatchParticipantJoined(watchOpts, participantJoinedCh)
 	if err != nil {
 		log.Fatalf("Failed to watch ParticipantJoined events: %v", err)
 	}
 	defer participantJoinedSub.Unsubscribe()
 
 	// Start watching for ParticipantLeft events
-	participantLeftSub, err := instance.WatchParticipantLeft(watchOpts, participantLeftCh)
+	participantLeftSub, err := contractInstance.WatchParticipantLeft(watchOpts, participantLeftCh)
 	if err != nil {
 		log.Fatalf("Failed to watch ParticipantLeft events: %v", err)
 	}
 	defer participantLeftSub.Unsubscribe()
 
 	// Start watching for TrackAdded events
-	trackAddedSub, err := instance.WatchTrackAdded(watchOpts, trackAddedCh)
+	trackAddedSub, err := contractInstance.WatchTrackAdded(watchOpts, trackAddedCh)
 	if err != nil {
 		log.Fatalf("Failed to watch TrackAdded events: %v", err)
 	}
 	defer trackAddedSub.Unsubscribe()
 
 	// Start watching for EventForwardedToBackend events
-	eventToBackendSub, err := instance.WatchEventForwardedToBackend(watchOpts, eventToBackendCh)
+	eventToBackendSub, err := contractInstance.WatchEventForwardedToBackend(watchOpts, eventToBackendCh)
 	if err != nil {
 		log.Fatalf("Failed to watch EventForwardedToBackend events: %v", err)
 	}
 	defer eventToBackendSub.Unsubscribe()
 
 	// Start watching for EventForwardedToFrontend events
-	eventToFrontendSub, err := instance.WatchEventForwardedToFrontend(watchOpts, eventToFrontendCh)
+	eventToFrontendSub, err := contractInstance.WatchEventForwardedToFrontend(watchOpts, eventToFrontendCh)
 	if err != nil {
 		log.Fatalf("Failed to watch EventForwardedToFrontend events: %v", err)
 	}
@@ -124,22 +183,25 @@ func main() {
 			// Consider implementing reconnection logic here
 
 		case event := <-participantJoinedCh:
-			handleParticipantJoined(event)
+			eventHandler.HandleParticipantJoined(event)
 
 		case event := <-participantLeftCh:
-			handleParticipantLeft(event)
+			eventHandler.HandleParticipantLeft(event)
 
 		case event := <-trackAddedCh:
-			handleTrackAdded(event)
+			eventHandler.HandleTrackAdded(event)
 
 		case event := <-eventToBackendCh:
-			handleEventToBackend(event)
+			eventHandler.HandleEventToBackend(event)
 
 		case event := <-eventToFrontendCh:
-			handleEventToFrontend(event)
+			// Just log these events as they're being sent from our backend to frontend
+			log.Printf("Event forwarded to frontend - Room: %s, Participant: %s",
+				event.RoomId, event.Participant.Hex())
 
 		case <-ticker.C:
-			// Periodic check or maintenance if needed
+			// Periodic health check
+			checkConnections(client)
 
 		case <-sigCh:
 			fmt.Println("Received termination signal, shutting down...")
@@ -148,59 +210,19 @@ func main() {
 	}
 }
 
-// forwardErrors forwards errors from one channel to another
+// forwardErrors forwards errors from subscription error channels to the main error channel
 func forwardErrors(from <-chan error, to chan<- error) {
 	for err := range from {
 		to <- err
 	}
 }
 
-// handleParticipantJoined processes ParticipantJoined events
-func handleParticipantJoined(event *contract.ContractParticipantJoined) {
-	fmt.Printf("Participant Joined - Room: %s, Address: %s\n",
-		event.RoomId, event.Participant.Hex())
-	fmt.Printf("Number of initial tracks: %d\n", len(event.InitialTracks))
-
-	// Add your business logic for handling participant joins
-	// For example, update your backend state, notify other participants, etc.
-}
-
-// handleParticipantLeft processes ParticipantLeft events
-func handleParticipantLeft(event *contract.ContractParticipantLeft) {
-	fmt.Printf("Participant Left - Room: %s, Address: %s\n",
-		event.RoomId, event.Participant.Hex())
-
-	// Add your business logic for handling participant leaves
-}
-
-// handleTrackAdded processes TrackAdded events
-func handleTrackAdded(event *contract.ContractTrackAdded) {
-	fmt.Printf("Track Added - Room: %s, Participant: %s, Track Name: %s\n",
-		event.RoomId, event.Participant.Hex(), event.TrackName)
-
-	// Add your business logic for handling new tracks
-}
-
-// handleEventToBackend processes EventForwardedToBackend events
-func handleEventToBackend(event *contract.ContractEventForwardedToBackend) {
-	fmt.Printf("Event To Backend - Room: %s, Sender: %s, Data: %s\n",
-		event.RoomId, event.Sender.Hex(), event.EventData)
-
-	// Process the event data from the frontend
-	// This could include commands, status updates, etc.
-}
-
-// handleEventToFrontend processes EventForwardedToFrontend events
-func handleEventToFrontend(event *contract.ContractEventForwardedToFrontend) {
-	fmt.Printf("Event To Frontend - Room: %s, Participant: %s, Data: %s\n",
-		event.RoomId, event.Participant.Hex(), event.EventData)
-
-	// Here you would typically forward this to your WebSocket/API service
-	// to relay to the appropriate frontend client
-}
-
-// Example function to query room participant count (not used in the event listening)
-func getParticipantCount(contractInstance *contract.Contract, roomId string) (*big.Int, error) {
-	opts := &bind.CallOpts{Context: context.Background()}
-	return contractInstance.GetRoomParticipantsCount(opts, roomId)
+// checkConnections performs a periodic health check of connections
+func checkConnections(client *ethclient.Client) {
+	// Check if we're still connected to the blockchain
+	_, err := client.BlockNumber(context.Background())
+	if err != nil {
+		log.Printf("Connection issue detected: %v", err)
+		// You could implement reconnection logic here
+	}
 }
