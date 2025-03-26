@@ -1,4 +1,4 @@
-package main
+package cloudflare
 
 import (
 	"bytes"
@@ -50,7 +50,7 @@ func (cs *CloudflareService) makeCloudflareRequest(method string, path string, b
 
 	req.Header.Set("Authorization", "Bearer "+cs.appSecret)
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
