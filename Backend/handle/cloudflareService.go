@@ -1,11 +1,15 @@
-package cloudflare
+package handle
 
 import (
 	"bytes"
+	"compress/zlib"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
 )
 
 type CloudflareService struct {
@@ -90,22 +94,54 @@ func (cs *CloudflareService) makeCloudflareRequest(method string, path string, b
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("error converting response to map: %v", err)
 	}
-
+	// log result
+	log.Printf("[Cloudflare API Response] Status: %d, Body: %s", resp.StatusCode, string(respBody))
 	return result, nil
 }
 
 // CreateSession creates a new session
 func (cs *CloudflareService) CreateSession() (string, error) {
-	response, err := cs.makeCloudflareRequest("POST", "/sessions/new", nil)
+	cloudflareBasePath := fmt.Sprintf("%s/%s", "https://rtc.live.cloudflare.com/v1/apps", cs.appID)
+
+	url := fmt.Sprintf("%s/sessions/new", cloudflareBasePath)
+	log.Printf("[Cloudflare API] Creating new session: %s", url)
+
+	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
+		log.Printf("[Cloudflare API Error] Failed to create request: %v", err)
 		return "", err
 	}
 
-	sessionID, ok := response["sessionId"].(string)
-	if !ok {
-		return "", fmt.Errorf("sessionId not found in response")
+	req.Header.Set("Authorization", "Bearer "+cs.appSecret)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[Cloudflare API Error] Failed to execute request: %v", err)
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[Cloudflare API Error] Failed to read response body: %v", err)
+		return "", err
 	}
 
+	log.Printf("[Cloudflare API Response] Status: %d, Body: %s", resp.StatusCode, string(body))
+
+	var responseData map[string]interface{}
+	if err := json.Unmarshal(body, &responseData); err != nil {
+		log.Printf("[Cloudflare API Error] Failed to parse response: %v", err)
+		return "", err
+	}
+
+	sessionID, ok := responseData["sessionId"].(string)
+	if !ok {
+		log.Printf("[Cloudflare API Error] Session ID not found in response")
+		return "", fmt.Errorf("sessionId not found in response: %s", string(body))
+	}
+
+	log.Printf("[Cloudflare API Success] Created session: %s", sessionID)
 	return sessionID, nil
 }
 
@@ -160,4 +196,133 @@ func (cs *CloudflareService) CloseTracks(sessionID string, tracks []map[string]s
 func (cs *CloudflareService) GetSessionState(sessionID string) (map[string]interface{}, error) {
 	url := fmt.Sprintf("/sessions/%s", sessionID)
 	return cs.makeCloudflareRequest("GET", url, nil)
+}
+
+// decompress decompresses zlib-compressed base64-encoded data
+func (cs *CloudflareService) decompressZlib(compressedB64 string) (string, error) {
+	// Decode base64
+	compressedData, err := base64.StdEncoding.DecodeString(compressedB64)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode base64: %v", err)
+	}
+
+	// Create zlib reader
+	zlibReader, err := zlib.NewReader(bytes.NewReader(compressedData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create zlib reader: %v", err)
+	}
+	defer zlibReader.Close()
+
+	// Read decompressed data
+	decompressed, err := io.ReadAll(zlibReader)
+	if err != nil {
+		return "", fmt.Errorf("failed to decompress data: %v", err)
+	}
+
+	return string(decompressed), nil
+}
+
+// decompressData is a more general decompression function that can handle both
+// base64+zlib compression and direct zlib compression
+func (cs *CloudflareService) decompressData(data []byte) (string, error) {
+	// Check if the data is in string format
+	dataStr := string(data)
+
+	// If data starts with "zlib:" prefix, it's base64-encoded zlib data from our frontend
+	if strings.HasPrefix(dataStr, "zlib:") {
+		// Extract the base64 part
+		compressedB64 := strings.TrimPrefix(dataStr, "zlib:")
+		log.Printf("Found zlib-prefixed data, decompressing with base64 decoder")
+		return cs.decompressZlib(compressedB64)
+	}
+
+	// Try to decompress directly as zlib
+	zlibReader, err := zlib.NewReader(bytes.NewReader(data))
+	if err == nil {
+		defer zlibReader.Close()
+
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, zlibReader); err != nil {
+			return "", fmt.Errorf("failed to decompress zlib data: %v", err)
+		}
+
+		log.Printf("Successfully decompressed data directly with zlib")
+		return buf.String(), nil
+	}
+
+	// If we got here, try treating the data as JSON first
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err == nil {
+		// The data is valid JSON, check if it has a compressedData field
+		if compressedStr, ok := result["compressedData"].(string); ok && strings.HasPrefix(compressedStr, "zlib:") {
+			// Extract the base64 part
+			compressedB64 := strings.TrimPrefix(compressedStr, "zlib:")
+			log.Printf("Found nested zlib-prefixed data in JSON, decompressing with base64 decoder")
+			return cs.decompressZlib(compressedB64)
+		}
+	}
+
+	// If no compression method worked, return data as-is
+	log.Printf("No compression format detected, returning data as-is")
+	return dataStr, nil
+}
+
+// HandleParticipantEvent processes events for a participant, creates a session and publishes tracks
+func (cs *CloudflareService) HandleParticipantEvent(roomID string, participant string, tracks []interface{}, sessionDescription interface{}) (string, map[string]interface{}, error) {
+	// Create session
+	sessionID, err := cs.CreateSession()
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create Cloudflare session: %v", err)
+	}
+
+	// Format session description for Cloudflare
+	var offer map[string]interface{}
+
+	if sdpStr, ok := sessionDescription.([]byte); ok {
+		// Parse SDP from bytes
+		sdpString := string(sdpStr)
+
+		// Check if the SDP is zlib compressed
+		if strings.HasPrefix(sdpString, "zlib:") {
+			// Extract the base64 part
+			compressedB64 := strings.TrimPrefix(sdpString, "zlib:")
+
+			// Decompress the SDP
+			decompressedJson, err := cs.decompressZlib(compressedB64)
+			if err != nil {
+				return sessionID, nil, fmt.Errorf("failed to decompress SDP: %v", err)
+			}
+
+			// Parse decompressed SDP
+			if err := json.Unmarshal([]byte(decompressedJson), &offer); err != nil {
+				return sessionID, nil, fmt.Errorf("failed to parse decompressed SDP: %v", err)
+			}
+		} else {
+			// Regular SDP without compression
+			if err := json.Unmarshal(sdpStr, &offer); err != nil {
+				return sessionID, nil, fmt.Errorf("failed to parse session description: %v", err)
+			}
+		}
+	} else if sdpMap, ok := sessionDescription.(map[string]interface{}); ok {
+		// Session description is already a map
+		offer = sdpMap
+	} else {
+		return sessionID, nil, fmt.Errorf("invalid session description format")
+	}
+
+	// Format tracks for Cloudflare API
+	cfTracks := make([]map[string]interface{}, 0)
+	for _, track := range tracks {
+		if trackMap, ok := track.(map[string]interface{}); ok {
+			cfTracks = append(cfTracks, trackMap)
+		}
+	}
+
+	// Publish tracks
+	response, err := cs.PublishTracks(sessionID, offer, cfTracks)
+	if err != nil {
+		return sessionID, nil, fmt.Errorf("failed to publish tracks: %v", err)
+	}
+
+	return sessionID, response, nil
 }

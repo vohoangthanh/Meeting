@@ -2,7 +2,10 @@ module dappmeetingnew
 
 go 1.23.5
 
-require github.com/ethereum/go-ethereum v1.15.6
+require (
+	github.com/ethereum/go-ethereum v1.15.6
+	github.com/joho/godotenv v1.5.1
+)
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect

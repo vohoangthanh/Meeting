@@ -25,29 +25,11 @@ var (
 	cloudflareBaseURL   string
 	cloudflareAppID     string
 	cloudflareAppSecret string
+	walletPrivateKey    string
 )
 
 func init() {
-	// Load environment variables
-	paths := []string{
-		".env",       // Current directory
-		"../.env",    // Parent directory
-		"../../.env", // Two levels up
-		"D:/DAppMeetingNew/backend/.env",
-	}
-
-	loaded := false
-	for _, path := range paths {
-		if err := godotenv.Load(path); err == nil {
-			loaded = true
-			log.Printf("Loaded environment from %s\n", path)
-			break
-		}
-	}
-
-	if !loaded {
-		log.Println("Warning: No .env file found. Using default or environment values.")
-	}
+	godotenv.Load() // Load environment variables from .env file
 
 	// Load configurations with fallback to defaults
 	ethereumNodeURL = getEnv("ETHEREUM_NODE_URL", "wss://bsc-testnet-rpc.publicnode.com")
@@ -55,6 +37,7 @@ func init() {
 	cloudflareBaseURL = getEnv("CLOUDFLARE_BASE_URL", "https://rtc.live.cloudflare.com/v1/apps")
 	cloudflareAppID = getEnv("CLOUDFLARE_APP_ID", "977c39eac9a8fc03a471d7da6a7d66e0")
 	cloudflareAppSecret = getEnv("CLOUDFLARE_APP_SECRET", "f069115dbeb5847040e7dbb7f9c79772fa923534fe1f74e3a62d54561aa12118")
+	walletPrivateKey = getEnv("WALLET_PRIVATE_KEY", "")
 
 	log.Printf("Ethereum Node URL: %s\n", ethereumNodeURL)
 	log.Printf("Contract Address: %s\n", contractAddress)
@@ -62,6 +45,10 @@ func init() {
 
 	if cloudflareAppID == "" || cloudflareAppSecret == "" {
 		log.Println("Warning: Cloudflare credentials not set. Please check your environment variables.")
+	}
+
+	if walletPrivateKey == "" {
+		log.Println("Warning: Wallet private key not set. Please check your environment variables.")
 	}
 }
 
@@ -100,7 +87,7 @@ func main() {
 		log.Fatalf("Failed to initialize SM Call Manager: %v", err)
 	}
 	defer smCallManager.Close()
-	fmt.Println("SM Call Manager initialized")
+	fmt.Println("SM Call Manager initialized with single wallet and queue system")
 
 	// Initialize EventHandler
 	eventHandler := handle.NewEventHandler(contractInstance, cloudflareService, smCallManager)
@@ -170,6 +157,7 @@ func main() {
 	go forwardErrors(eventToFrontendSub.Err(), errorCh)
 
 	fmt.Println("Listening for contract events...")
+	fmt.Println("Using single wallet for all transactions with queuing system")
 
 	// Create a ticker for retrying lost connections
 	ticker := time.NewTicker(30 * time.Second)
@@ -180,28 +168,44 @@ func main() {
 		select {
 		case err := <-errorCh:
 			log.Printf("Error in subscription: %v", err)
-			// Consider implementing reconnection logic here
+			// Implement reconnection logic if needed
 
 		case event := <-participantJoinedCh:
+			log.Printf("Received ParticipantJoined event for room %s, processing...", event.RoomId)
 			eventHandler.HandleParticipantJoined(event)
+			queueLength := smCallManager.GetQueueLength()
+			if queueLength > 0 {
+				log.Printf("Current transaction queue length: %d", queueLength)
+			}
 
 		case event := <-participantLeftCh:
+			log.Printf("Received ParticipantLeft event for room %s", event.RoomId)
 			eventHandler.HandleParticipantLeft(event)
 
 		case event := <-trackAddedCh:
+			log.Printf("Received TrackAdded event for room %s", event.RoomId)
 			eventHandler.HandleTrackAdded(event)
 
 		case event := <-eventToBackendCh:
+			log.Printf("Received EventForwardedToBackend for room %s", event.RoomId)
 			eventHandler.HandleEventToBackend(event)
+			queueLength := smCallManager.GetQueueLength()
+			if queueLength > 0 {
+				log.Printf("Current transaction queue length after event processing: %d", queueLength)
+			}
 
 		case event := <-eventToFrontendCh:
-			// Just log these events as they're being sent from our backend to frontend
+			// Log events forwarded from backend to frontend
 			log.Printf("Event forwarded to frontend - Room: %s, Participant: %s",
 				event.RoomId, event.Participant.Hex())
 
 		case <-ticker.C:
-			// Periodic health check
+			// Periodic health check and report queue status
 			checkConnections(client)
+			queueLength := smCallManager.GetQueueLength()
+			if queueLength > 0 {
+				log.Printf("Current transaction queue length: %d", queueLength)
+			}
 
 		case <-sigCh:
 			fmt.Println("Received termination signal, shutting down...")
