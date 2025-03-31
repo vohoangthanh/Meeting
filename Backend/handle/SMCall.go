@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,6 +182,37 @@ func (m *SMCallManager) SetParticipantSessionID(roomID string, participant commo
 	return response.TxHash, response.Error
 }
 
+// AddNewTrackAfterPublish adds track information to the smart contract after Cloudflare publishes a track
+func (m *SMCallManager) AddNewTrackAfterPublish(roomID string, participant common.Address, sessionID string,
+	trackName string, mid string, location string, isPublished bool) (common.Hash, error) {
+
+	respChan := make(chan *TransactionResponse)
+	request := TransactionRequest{
+		Method:       "AddNewTrackAfterPublish",
+		RoomID:       roomID,
+		Participant:  participant,
+		SessionID:    sessionID,
+		EventData:    []byte(fmt.Sprintf("%s|%s|%s|%v", trackName, mid, location, isPublished)),
+		ResponseChan: respChan,
+	}
+
+	// Add request to queue
+	m.mu.Lock()
+	m.requestQueue = append(m.requestQueue, request)
+	m.mu.Unlock()
+
+	// Signal the queue processor
+	select {
+	case m.queueSignal <- struct{}{}:
+	default:
+		// Signal already in queue
+	}
+
+	// Wait for response
+	response := <-respChan
+	return response.TxHash, response.Error
+}
+
 // processQueue continuously processes the transaction queue
 func (m *SMCallManager) processQueue() {
 	for {
@@ -240,6 +272,22 @@ func (m *SMCallManager) processNextRequest() {
 		case "SetParticipantSessionID":
 			txHash, err = m.executeTransaction(func(auth *bind.TransactOpts) (*types.Transaction, error) {
 				return m.contract.SetParticipantSessionID(auth, req.RoomID, req.Participant, req.SessionID)
+			})
+		case "AddNewTrackAfterPublish":
+			// Parse track data from EventData (format: trackName|mid|location|isPublished)
+			parts := strings.Split(string(req.EventData), "|")
+			if len(parts) != 4 {
+				err = fmt.Errorf("invalid track data format")
+				break
+			}
+			trackName := parts[0]
+			mid := parts[1]
+			location := parts[2]
+			isPublished := parts[3] == "true"
+
+			txHash, err = m.executeTransaction(func(auth *bind.TransactOpts) (*types.Transaction, error) {
+				return m.contract.AddNewTrackAfterPublish(auth, req.RoomID, req.Participant, req.SessionID,
+					trackName, mid, location, isPublished)
 			})
 		default:
 			err = fmt.Errorf("unknown method: %s", req.Method)

@@ -1,25 +1,25 @@
 import CloudflareCalls from './CloudflareCalls.js';
+import SmartContractConnector from './smartContractIntegration.js';
+import { auth } from './auth.js';
+import smartContractIntegration from './smartContractIntegration.js';
 
 // Lấy current URL và cấu hình endpoints
+// const currentUrl = 'https://manhteky123-dappmeetingv3.hf.space';
 const currentUrl = window.location.origin;
 const isLocalhost = currentUrl.includes('localhost') || currentUrl.includes('127.0.0.1');
 
 // Cấu hình endpoints dựa trên môi trường
 const config = {
-    backendUrl: isLocalhost ? 'http://localhost:60000' : currentUrl,
+    backendUrl: isLocalhost ? 'http://localhost:50000' : currentUrl,
     websocketUrl: isLocalhost
         ? 'ws://localhost:50000/ws'
-        : currentUrl.replace('http', 'ws').replace('https', 'wss') + '/ws',
-    backendUrl2: isLocalhost ? 'http://localhost:60000' : currentUrl,
-    websocketUrl2: isLocalhost
-        ? 'ws://localhost:60000/ws'
-        : currentUrl.replace('http', 'ws').replace('https', 'wss') + '/ws',
+        : 'wss://manhteky123-dappmeetingv3.hf.space/ws'
 };
-const baseAPI = isLocalhost ? 'http://localhost:60000' : currentUrl;
+const baseAPI = isLocalhost ? 'http://localhost:50000' : 'https://manhteky123-dappmeetingv3.hf.space';
 const calls = new CloudflareCalls(config);
 
 // Tương tự cho screenShareCalls
-const screenShareConfig = {...config};
+const screenShareConfig = { ...config };
 
 let currentRoom = null;
 let screenShareCalls = null;
@@ -32,7 +32,10 @@ let masksList = [];
 let faceMaskFilter = null;
 let backgroundBlur = null;
 let processedStream = null;
+let participants = [];
 
+let trackPullCompleteListener = null;
+let leaveRoomListener = null;
 
 // DOM Elements
 const videoGrid = document.getElementById('videoGrid');
@@ -50,28 +53,45 @@ const notificationsContainer = document.getElementById('notificationsContainer')
 // Get stored data from localStorage
 const username = localStorage.getItem('username');
 const roomId = localStorage.getItem('roomId');
+const walletAddress = localStorage.getItem('privateKey');
+
+// Check wallet connection before proceeding
+async function checkWalletAuth() {
+    // Check if wallet address exists in localStorage
+    if (!walletAddress) {
+        showNotification('Wallet authentication required', 'error');
+        setTimeout(() => {
+            window.location.href = 'index.html';
+        }, 2000);
+        return false;
+    }
+
+    return true;
+}
 
 // Get token and initialize calls
 async function ensureInitialized() {
-    if (!calls.token) {
-        try {
-            calls.inauthtoken(username);
-            // const response = await fetch(`${baseAPI}/auth/token`, {
-            //     method: 'POST',
-            //     headers: { 'Content-Type': 'application/json' },
-            //     body: JSON.stringify({ username })
-            // });
+    // if (!calls.token) {
+    //     try {
+    //         const response = await fetch(`${baseAPI}/auth/token`, {
+    //             method: 'POST',
+    //             headers: { 'Content-Type': 'application/json' },
+    //             body: JSON.stringify({
+    //                 username,
+    //                 walletAddress: auth.userAddress
+    //             })
+    //         });
 
-            // const { token } = await response.json();
-            // calls.setToken(token);
-            // showNotification('Successfully initialized');
-            // return true;
-        } catch (err) {
-            console.error('Error getting token:', err);
-            showNotification('Failed to initialize', 'error');
-            return false;
-        }
-    }
+    //         const { token } = await response.json();
+    //         calls.setToken(token);
+    //         showNotification('Successfully initialized');
+    //         return true;
+    //     } catch (err) {
+    //         console.error('Error getting token:', err);
+    //         showNotification('Failed to initialize', 'error');
+    //         return false;
+    //     }
+    // }
     return true;
 }
 
@@ -119,198 +139,426 @@ async function setupLocalVideo() {
 }
 
 function getParticipantDisplayName(participant) {
-    return participant.name || `User-${participant.userId.slice(0, 6)}`;
+    let displayName = participant.name || `User-${participant.userId.slice(0, 6)}`;
+    if (participant.walletAddress) {
+        const shortAddress = participant.walletAddress.substring(0, 6) + '...' +
+            participant.walletAddress.substring(participant.walletAddress.length - 4);
+        displayName += ` (${shortAddress})`;
+    }
+    return displayName;
+}
+
+async function pullParticipantTracks(sessionId, trackNames) {
+    try {
+        for (const trackName of trackNames) {
+            console.log(`Pulling track ${trackName} from session ${sessionId}`);
+            // Process one track at a time, waiting for each to complete
+            await calls._pullTracks(sessionId, trackName);
+            console.log(`Successfully pulled track ${trackName} from session ${sessionId}`);
+        }
+        return true;
+    } catch (error) {
+        console.error('Error pulling tracks:', error);
+        return false;
+    }
 }
 
 async function joinRoom() {
+    // 1. First verify smart contract connection is established
+    if (!SmartContractConnector.contract) {
+        console.error('Smart contract not initialized, initializing...');
+        await SmartContractConnector.initialize();
+    }
+
+    // 2. Before joining the room via WebRTC, make sure to join via smart contract first
+    // This ensures you're properly registered as a participant
+    console.log('Joining room via smart contract first...');
+    await SmartContractConnector.joinRoom(roomId, username, []);
+    console.log('Successfully joined room via smart contract');
+    // 1. Join room và lấy session
+    await calls.joinRoom(roomId, { name: username });
+    currentRoom = roomId;
+    showNotification(`Joined room: ${roomId}`);
+
+    // 2. Setup handlers trước khi pull tracks
+    setupCallbacks();
+
+    // Verify smart contract connection
+    if (!SmartContractConnector.contract) {
+        console.error('Smart contract not initialized, reinitializing...');
+        await SmartContractConnector.initialize();
+    }
+
+    // 3. Lấy danh sách người tham gia
+    participants = await calls.getParticipantsFromContract(roomId);
+    console.log('Current participants:', participants);
+
+    // 4. Cập nhật sessionId của bản thân khi lấy từ smart constract
     try {
-        // 1. Join room và lấy session
-        await calls.joinRoom(roomId, { name: username });
-        currentRoom = roomId;
-        showNotification(`Joined room: ${roomId}`);
+        // Create wallet from private key to get the address
+        const wallet = new ethers.Wallet(localStorage.getItem('privateKey'));
+        const myWalletAddress = wallet.address;
+        
+        console.log('Looking for participant with my wallet address:', myWalletAddress);
+        
+        // Find participant with matching wallet address
+        const participant = participants.find(p => 
+            p.walletAddress && 
+            p.walletAddress.toLowerCase() === myWalletAddress.toLowerCase()
+        );
+        
+        if (participant) {
+            calls.sessionId = participant.sessionId;
+            console.log('Found myself in participants list. My session ID:', calls.sessionId);
+        } else {
+            console.error('Participant not found in the list. Available participants:', 
+                participants.map(p => ({ name: p.name, address: p.walletAddress, sessionId: p.sessionId }))
+            );
+            return;
+        }
+    } catch (error) {
+        console.error('Error finding participant:', error);
+        return;
+    }
 
-        // 2. Setup handlers trước khi pull tracks
-        setupCallbacks();
+    // Đợi peerConnection kết nối thành công
+    await new Promise(resolve => {
+        console.log('Peer Connection state:', calls.peerConnection.connectionState);
+        console.log('Waiting for connection to be established...');
+        if (calls.peerConnection.connectionState === 'connected') {
+            resolve();
+        } else {
+            calls.peerConnection.onconnectionstatechange = () => {
+                if (calls.peerConnection.connectionState === 'connected') {
+                    resolve();
+                }
+            };
+        }
+    });
 
-        // 3. Lấy danh sách người tham gia
-        const participants = await calls.listParticipants();
-        console.log('Current participants:', participants);
+    console.log('Peer Connection established:', calls.peerConnection.connectionState);
+    await notifyPullComplete();
 
-        // 4. Set up remote streams for existing participants
-        for (const participant of participants) {
-            // Skip if it's our own session
-            if (participant.sessionId === calls.sessionId) continue;
+    // 5. Set up remote streams for existing participants
+    for (const participant of participants) {
+        // Skip if it's our own session
+        if (participant.sessionId === calls.sessionId) continue;
 
-            console.log('Processing participant:', participant);
+        console.log('Processing participant:', participant);
 
-            // Create container for this participant if not exists
-            const containerId = `participant-${participant.sessionId}`;
-            if (!document.getElementById(containerId)) {
-                const container = document.createElement('div');
-                container.id = containerId;
-                container.className = 'video-container';
+        // // Create container for this participant if not exists
+        // const containerId = `participant-${participant.sessionId}`;
 
-                const video = document.createElement('video');
-                video.autoplay = true;
-                video.playsInline = true;
+        // if (!document.getElementById(containerId)) {
+        //     const container = document.createElement('div');
+        //     container.id = containerId;
+        //     container.className = 'video-container';
 
-                const name = document.createElement('div');
-                name.className = 'participant-name';
-                name.textContent = participant.name || `participant-${participant.sessionId}`;
+        //     const video = document.createElement('video');
+        //     video.autoplay = true;
+        //     video.playsInline = true;
 
-                container.appendChild(video);
-                container.appendChild(name);
-                videoGrid.appendChild(container);
+        //     const name = document.createElement('div');
+        //     name.className = 'participant-name';
+        //     name.textContent = participant.name || `participant-${participant.sessionId}`;
 
-                // Set up MediaStream for this participant
-                video.srcObject = new MediaStream();
-            }
+        //     container.appendChild(video);
+        //     container.appendChild(name);
+        //     videoGrid.appendChild(container);
 
-            // Pull each track from the participant
-            for (const trackName of participant.publishedTracks) {
-                console.log(`Pulling track ${trackName} from session ${participant.sessionId}`);
-                await calls._pullTracks(participant.sessionId, trackName);
-            }
+        //     // Set up MediaStream for this participant
+        //     video.srcObject = new MediaStream();
+        // }
+
+        // Pull each track from the participant
+        for (const trackName of participant.publishedTracks) {
+            console.log(`Pulling track ${trackName} from session ${participant.sessionId}`);
+            await calls._pullTracks(participant.sessionId, trackName);
+        }
+    }
+
+
+    SmartContractConnector.contract.on("sendNotificationToRoom", (roomId, message) => {
+        console.log('Wave event received:', { roomId, message });
+        showNotification(`👋 ${message}`);
+    });
+
+    // 5. Start monitoring stats sau khi mọi thứ đã setup
+    calls.startStatsMonitoring(1000);
+}
+
+// Function to notify others that you've pulled all tracks
+async function notifyPullComplete() {
+    try {
+        const wallet = new ethers.Wallet(localStorage.getItem('privateKey'));
+        // Get user address for event filtering
+        const userAddress = wallet.address;
+        // Get your published tracks
+        const myTracks = calls.localStream ?
+            calls.localStream.getTracks().map(track => track.id) : [];
+        // If no tracks, still pass an empty array
+        const tracksArray = Array.isArray(myTracks) ? myTracks : [myTracks];
+
+        await SmartContractConnector.notifyTrackPullComplete(
+            roomId,
+            userAddress,
+            calls.sessionId,
+            tracksArray
+        );
+        console.log("Notified other participants about my tracks");
+    } catch (error) {
+        console.error("Error notifying track pull complete:", error);
+    }
+}
+async function checkAndRestoreEventListeners() {
+    // const reconnected = await SmartContractConnector.reestablishEventListeners();
+    const reconnected = true;
+
+    if (reconnected) {
+        console.log("WebSocket reconnected, restoring event listeners...");
+
+        // Re-establish track pull complete listener
+        if (trackPullCompleteListener) {
+            trackPullCompleteListener = await SmartContractConnector.listenForTrackPullComplete(
+                roomId,
+                calls.sessionId,
+                async (data) => {
+                    console.log('Track pull complete:', data);
+                    if (data.sessionId !== calls.sessionId) {
+                        console.log(`New participant joined with ${data.trackNames.length} tracks, pulling tracks...`);
+                        await pullParticipantTracks(data.sessionId, data.trackNames);
+                    }
+                }
+            );
         }
 
-        // 5. Start monitoring stats sau khi mọi thứ đã setup
-        calls.startStatsMonitoring(1000);
-    } catch (err) {
-        console.error('Error joining room:', err);
-        showNotification('Failed to join room: ' + err.message, 'error');
+        // Re-establish leave room listener
+        if (leaveRoomListener) {
+            leaveRoomListener = await SmartContractConnector.listenForParticipantLeaveRoom(
+                roomId,
+                (data) => {
+                    console.log('Participant left:', data);
+                    try {
+                        const sessionId = data.sessionId;
+                        const container = document.getElementById(`participant-${sessionId}`);
+                        if (container) {
+                            container.remove();
+                        }
+                        const container2 = document.getElementById(`participant ${sessionId}`);
+                        if (container2) {
+                            container2.remove();
+                        }
+                        showNotification(`A participant left the room`);
+                    } catch (error) {
+                        console.error('Error handling participant leave event:', error);
+                    }
+                }
+            );
+        }
     }
 }
 
 async function setupScreenShare() {
+    try {
+        // Get screen share stream
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false
+        });
 
-    // Tạo một instance CloudflareCalls mới cho screen share
-    screenShareCalls = new CloudflareCalls(screenShareConfig);
+        // Store screen stream reference
+        calls.screenStream = screenStream;
 
-    // Khởi tạo token cho screen share
-    const response = await fetch(`${baseAPI}/auth/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username + '-screen' })
-    });
+        // Create new stream for screen sharing
+        const screenTrack = screenStream.getVideoTracks()[0];
 
-    const { token } = await response.json();
-    screenShareCalls.setToken(token);
-
-    // Lấy screen share stream
-    const screenStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false
-    });
-
-    // Lưu stream và join room
-    screenShareCalls.localStream = screenStream;
-    await screenShareCalls.joinRoom(roomId, { name: username + "'s Screen" });
-
-    // THÊM: Publish tracks sau khi join room
-    await screenShareCalls.publishTracks();
-
-    // Setup callback cho screen share để nhận remote tracks
-    screenShareCalls.onRemoteTrack((track) => {
-        console.log('Screen share track received:', track);
-        const containerId = `participant-${track.sessionId}`;
-        let container = document.getElementById(containerId);
-
-        if (!container) {
-            container = document.createElement('div');
-            container.id = containerId;
-            container.className = 'video-container';
-
-            const video = document.createElement('video');
-            video.autoplay = true;
-            video.playsInline = true;
-
-            const name = document.createElement('div');
-            name.className = 'participant-name';
-            name.textContent = username + "'s Screen";
-
-            container.appendChild(video);
-            container.appendChild(name);
-            videoGrid.appendChild(container);
-
-            video.srcObject = new MediaStream();
+        // Create new peer connection for screen share if needed
+        if (!calls.peerConnection) {
+            await calls._createPeerConnection();
         }
 
-        const video = container.querySelector('video');
-        video.srcObject.addTrack(track);
-    });
 
-    // Lắng nghe sự kiện kết thúc screen share
-    const screenTrack = screenStream.getVideoTracks()[0];
-    screenTrack.onended = async () => {
-        await stopScreenShare();
-    };
+        // Đợi trạng thái kết nối ổn định trước khi thêm track
+        if (calls.peerConnection.signalingState !== 'stable') {
+            console.log('Waiting for signaling state to stabilize...');
+            await new Promise(resolve => {
+                const checkState = () => {
+                    if (calls.peerConnection.signalingState === 'stable') {
+                        resolve();
+                    } else {
+                        setTimeout(checkState, 100);
+                    }
+                };
+                checkState();
+            });
+        }
+        // First add the track to the peer connection and store the sender
+        calls.screenTrackSender = calls.peerConnection.addTrack(screenTrack, calls.localStream);
 
-    // Cập nhật icon
-    controls.shareScreen.querySelector('.material-icons').textContent = 'stop_screen_share';
-    showNotification('Screen sharing started');
 
+        calls.localStream.addTrack(screenTrack);
 
-}
+        // Create screen share container
+        const screenContainer = document.createElement('div');
+        screenContainer.id = 'screen-share-container';
+        screenContainer.className = 'video-container screen-share';
 
-async function stopScreenShare() {
-    if (screenShareCalls) {
-        // Dọn dẹp stream
-        if (screenShareCalls.localStream) {
-            screenShareCalls.localStream.getTracks().forEach(track => track.stop());
+        // Create video element for screen share
+        const screenVideo = document.createElement('video');
+        screenVideo.autoplay = true;
+        screenVideo.playsInline = true;
+        screenVideo.srcObject = calls.screenStream;
+
+        // Add label
+        const nameLabel = document.createElement('div');
+        nameLabel.className = 'participant-name';
+        nameLabel.textContent = 'Screen Share';
+
+        screenContainer.appendChild(screenVideo);
+        screenContainer.appendChild(nameLabel);
+        videoGrid.appendChild(screenContainer);
+
+        // Publish track
+        try {
+            await calls._publishTracks();
+            console.log("Screen share track published successfully");
+            const wallet = new ethers.Wallet(localStorage.getItem('privateKey'));
+            // Get user address for event filtering
+            const userAddress = wallet.address;
+            // Get your published tracks
+            console.log("Notify share track: ", roomId, userAddress, calls.sessionId, [screenTrack.id]);
+            await smartContractIntegration.notifyTrackPullComplete(
+                roomId,
+                userAddress,
+                calls.sessionId,
+                [screenTrack.id]
+            );
+            // Check and restore WebSocket event listeners
+            await checkAndRestoreEventListeners();
+        } catch (error) {
+            console.error("Error publishing screen share track:", error);
+            screenTrack.stop();
+            // Clean up the track if publishing fails
+            if (calls.screenTrackSender) {
+                calls.peerConnection.removeTrack(calls.screenTrackSender);
+                calls.screenTrackSender = null;
+            }
+            throw error;
         }
 
-        // Rời phòng và đóng kết nối
-        await screenShareCalls.leaveRoom();
-        screenShareCalls = null;
+        // Listen for end of screen sharing
+        screenTrack.onended = async () => {
+            await stopScreenShare();
+        };
 
-        // Cập nhật UI
-        controls.shareScreen.querySelector('.material-icons').textContent = 'screen_share';
-        showNotification('Screen sharing ended');
+        // Update UI
+        controls.shareScreen.querySelector('.material-icons').textContent = 'stop_screen_share';
+        showNotification('Screen sharing started');
+
+    } catch (error) {
+        console.error("Error setting up screen share:", error);
+        showNotification('Failed to share screen', 'error');
     }
 }
 
-function setupCallbacks() {
+async function stopScreenShare() {
+    try {
+        if (calls.screenStream) {
+            // Stop all tracks in the screen stream
+            calls.screenStream.getTracks().forEach(track => track.stop());
+
+            // Remove the track sender from the peer connection
+            if (calls.screenTrackSender) {
+                calls.peerConnection.removeTrack(calls.screenTrackSender);
+                calls.screenTrackSender = null;
+            }
+
+            // Clean up references
+            calls.screenStream = null;
+
+            // Update UI
+            controls.shareScreen.querySelector('.material-icons').textContent = 'screen_share';
+            showNotification('Screen sharing ended');
+        }
+    } catch (error) {
+        console.error("Error stopping screen share:", error);
+        showNotification('Error stopping screen share', 'error');
+    }
+}
+
+async function setupCallbacks() {
     calls.onRemoteTrack((track) => {
         console.log('Remote track received:', track);
-        const containerId = `participant-${track.sessionId}`;
-        let container = document.getElementById(containerId);
 
-        if (!container) {
-            container = document.createElement('div');
-            container.id = containerId;
-            container.className = 'video-container';
+        // Create unique ID for each video track
+        const trackId = `track-${track.sessionId}-${track.id}`;
+        let trackContainer = document.getElementById(trackId);
 
-            const video = document.createElement('video');
-            video.autoplay = true;
-            video.playsInline = true;
-
-            const name = document.createElement('div');
-            name.className = 'participant-name';
-            name.textContent = 'Participant ' + track.sessionId;
-
-            container.appendChild(video);
-            container.appendChild(name);
-            videoGrid.appendChild(container);
-
-            
+        // If this track already has a container, just update it
+        if (trackContainer) {
+            console.log('Container for this track already exists, updating');
+            return;
         }
 
-        const video = container.querySelector('video');
-        if (!video.srcObject) {
-            video.srcObject = new MediaStream();
+        // For audio tracks, add to the participant's main container
+        if (track.kind === 'audio') {
+            const participantId = `participant-${track.sessionId}`;
+            const participantContainer = document.getElementById(participantId);
+
+            if (participantContainer) {
+                const video = participantContainer.querySelector('video');
+                if (video && video.srcObject) {
+                    video.srcObject.addTrack(track);
+                }
+            }
+            return;
         }
+
+        // For video tracks, always create a new container with unique ID
+        trackContainer = document.createElement('div');
+        trackContainer.id = trackId;
+        trackContainer.className = 'video-container';
+        trackContainer.dataset.sessionId = track.sessionId; // Store session ID for cleanup
+
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.playsInline = true;
+
+        const name = document.createElement('div');
+        name.className = 'participant-name';
+        name.textContent = getParticipantName(track.sessionId);
+
+        // Create new MediaStream for this video
+        video.srcObject = new MediaStream();
         video.srcObject.addTrack(track);
+
+        trackContainer.appendChild(video);
+        trackContainer.appendChild(name);
+        videoGrid.appendChild(trackContainer);
+
+        // Helper function to get participant name
+        function getParticipantName(sessionId) {
+            const participant = participants.find(p => p.sessionId === sessionId);
+            return participant ? participant.name : `Participant ${sessionId}`;
+        }
     });
 
     calls.onRemoteTrackUnpublished((sessionId, trackName) => {
         console.log('Remote track unpublished:', { sessionId, trackName });
-        const containerId = `participant-${sessionId}`;
-        const container = document.getElementById(containerId);
 
-        if (container) {
-            const video = container.querySelector('video');
+        // Remove track-specific container if it exists
+        const trackContainerId = `track-${sessionId}-${trackName}`;
+        const trackContainer = document.getElementById(trackContainerId);
+        if (trackContainer) {
+            console.log(`Removing track container: ${trackContainerId}`);
+            trackContainer.remove();
+        }
+
+        // Also check if track exists in participant's container
+        const participantContainer = document.getElementById(`participant-${sessionId}`);
+        if (participantContainer) {
+            const video = participantContainer.querySelector('video');
             if (video && video.srcObject) {
-                // Tìm và xóa track khỏi MediaStream
                 const stream = video.srcObject;
                 const tracks = stream.getTracks();
                 tracks.forEach(track => {
@@ -319,11 +567,6 @@ function setupCallbacks() {
                         track.stop();
                     }
                 });
-
-                // Nếu không còn track nào, xóa container
-                if (stream.getTracks().length === 0) {
-                    container.remove();
-                }
             }
         }
     });
@@ -366,12 +609,28 @@ function setupCallbacks() {
     });
 
     calls.onParticipantLeft((participant) => {
-        const container = document.getElementById(`participant-${participant.sessionId}`);
-        if (container) {
-            container.remove();
-        }
-        showNotification(`${participant.name || 'A participant'} left the room`);
+        console.log('Participant left:', participant.sessionId);
 
+        // Remove all containers belonging to this participant
+        const containers = document.querySelectorAll(`[data-session-id="${participant.sessionId}"]`);
+        containers.forEach(container => {
+            console.log(`Removing container for left participant: ${container.id}`);
+            container.remove();
+        });
+
+        // Also remove traditional containers
+        const participantContainer = document.getElementById(`participant-${participant.sessionId}`);
+        if (participantContainer) {
+            participantContainer.remove();
+        }
+
+        // Remove any containers with old format IDs
+        const oldContainer = document.getElementById(`participant ${participant.sessionId}`);
+        if (oldContainer) {
+            oldContainer.remove();
+        }
+
+        showNotification(`${participant.name || 'A participant'} left the room`);
     });
 
     // Sửa lại handler cho data messages
@@ -383,17 +642,8 @@ function setupCallbacks() {
     // Sửa lại handler cho nút vẫy tay
     controls.wave.onclick = async () => {
         try {
-            // Gửi tin nhắn vẫy tay với đầy đủ thông tin
-            await calls.sendDataToAll({
-                type: 'wave',
-                fromSession: calls.sessionId,
-                fromName: username,
-                timestamp: Date.now() // Thêm timestamp để tránh trùng lặp
-            });
-
-            // Hiển thị thông báo local
-            showNotification('Bạn đã vẫy tay chào mọi người! 👋');
-
+            await SmartContractConnector.sendNotificationToRoom(roomId, '👋 ' + username + ' vẫy tay chào!');
+            console.log('Wave sent successfully');
         } catch (error) {
             console.error('Error sending wave:', error);
             showNotification('Không thể gửi vẫy tay', 'error');
@@ -429,8 +679,22 @@ function setupCallbacks() {
 
     controls.leave.onclick = async () => {
         if (currentRoom) {
-            await calls.leaveRoom();
-            window.location.href = 'index.html';
+            try {
+                // Hiển thị loading indicator hoặc thông báo
+                showNotification('Leaving room, please wait...', 'info');
+                controls.leave.disabled = true;  // Disable nút để tránh click nhiều lần
+
+                // Đợi cho đến khi leaveRoom hoàn tất
+                await calls.leaveRoom();
+
+                // Nếu thành công, chuyển trang
+                showNotification('Successfully left room', 'success');
+                window.location.href = 'index.html';
+            } catch (error) {
+                console.error('Error leaving room:', error);
+                showNotification('Failed to leave room properly', 'error');
+                controls.leave.disabled = false;  // Re-enable nút nếu có lỗi
+            }
         }
     };
 
@@ -452,6 +716,48 @@ function setupCallbacks() {
         blurBtn.classList.toggle('active', isBlurEnabled);
         await combineEffects();
     };
+
+
+    try {
+        // Setup event listeners concurrently using Promise.all
+        const [trackPullCleanup, leaveRoomCleanup] = await Promise.all([
+            // Track pull complete listener 
+            SmartContractConnector.listenForTrackPullComplete(roomId, calls.sessionId, async (data) => {
+                console.log('Track pull complete:', data);
+                if (data.sessionId !== calls.sessionId) {
+                    console.log(`New participant joined with ${data.trackNames.length} tracks, pulling tracks...`);
+                    await pullParticipantTracks(data.sessionId, data.trackNames);
+                }
+            }),
+
+            // Leave room listener
+            SmartContractConnector.listenForParticipantLeaveRoom(roomId, (data) => {
+                console.log('Participant left:', data);
+                try {
+                    const sessionId = data.sessionId;
+                    const container = document.getElementById(`participant-${sessionId}`);
+                    if (container) {
+                        container.remove();
+                    }
+                    const container2 = document.getElementById(`participant ${sessionId}`);
+                    if (container2) {
+                        container2.remove();
+                    }
+                    showNotification(`A participant left the room`);
+                } catch (error) {
+                    console.error('Error handling participant leave event:', error);
+                }
+            })
+        ]);
+
+        // Save listeners to global variables
+        trackPullCompleteListener = trackPullCleanup;
+        leaveRoomListener = leaveRoomCleanup;
+
+    } catch (error) {
+        console.error('Error setting up event listeners:', error);
+        throw error;
+    }
 }
 
 // Thêm CSS styles cho hiệu ứng vẫy tay
@@ -489,13 +795,18 @@ async function initialize() {
         return;
     }
 
+    // Check wallet authentication first
+    if (!await checkWalletAuth()) {
+        return;
+    }
+
     // Initialize background blur with existing canvas element
     const blurCanvas = document.getElementById('blurCanvas');
     if (!blurCanvas) {
         console.error('Blur canvas element not found');
         return;
     }
-    
+
     backgroundBlur = new BackgroundBlur(
         document.createElement('video'),
         blurCanvas
@@ -520,7 +831,6 @@ async function initialize() {
     if (await ensureInitialized()) {
         await setupLocalVideo();
         await joinRoom();
-        setupCallbacks();
     }
 }
 
@@ -528,10 +838,11 @@ document.addEventListener('DOMContentLoaded', initialize);
 
 window.addEventListener('beforeunload', () => {
     if (currentRoom) {
-        calls.leaveRoom();
-        if (screenShareCalls) {
-            screenShareCalls.leaveRoom();
+        // If we have an active screen share, stop it first
+        if (calls.screenStream) {
+            calls.screenStream.getTracks().forEach(track => track.stop());
         }
+        calls.leaveRoom();
     }
 });
 
@@ -573,7 +884,7 @@ function showMaskModal() {
         masks.forEach(maskFile => {
             const maskOption = document.createElement('div');
             maskOption.className = `mask-option ${maskFile === currentMask ? 'selected' : ''}`;
-            
+
             const maskName = maskFile.split('/')[1].replace('.png', '');
 
             maskOption.innerHTML = `
@@ -673,7 +984,7 @@ async function combineEffects() {
             blurredStream.getVideoTracks().forEach(track => {
                 finalStream.addTrack(track);
             });
-            
+
             // Add audio track
             const audioTrack = calls.localStream.getAudioTracks()[0];
             if (audioTrack) {
@@ -705,3 +1016,15 @@ async function combineEffects() {
         console.error('Error in combineEffects:', error);
     }
 }
+
+document.addEventListener('DOMContentLoaded', initialize);
+
+// Listen for wallet disconnection events
+auth.addAccountsChangedListener((address) => {
+    if (!address) {
+        showNotification('Wallet disconnected. You will be redirected to the login page.', 'error');
+        setTimeout(() => {
+            window.location.href = 'index.html';
+        }, 2000);
+    }
+});

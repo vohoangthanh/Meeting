@@ -239,6 +239,53 @@ func (h *EventHandler) handlePublishTrack(roomID string, sender common.Address, 
 		// Continue anyway as we need to send response back to frontend
 	}
 
+	// Process Cloudflare response and update smart contract with the track information
+	if cloudflareTracks, ok := response["tracks"].([]interface{}); ok && len(cloudflareTracks) > 0 {
+		log.Printf("Received Cloudflare tracks: %+v", cloudflareTracks)
+
+		// For each track returned from Cloudflare, update the smart contract
+		for _, cfTrack := range cloudflareTracks {
+			if track, ok := cfTrack.(map[string]interface{}); ok {
+				var mid, trackName string
+
+				// Extract mid and trackName from the track
+				if midVal, ok := track["mid"].(string); ok {
+					mid = midVal
+				}
+
+				if nameVal, ok := track["trackName"].(string); ok {
+					trackName = nameVal
+				}
+
+				if mid != "" && trackName != "" {
+					// Call the smart contract function to add the track
+					log.Printf("Adding track to smart contract - Room: %s, Participant: %s, TrackName: %s, Mid: %s",
+						roomID, sender.Hex(), trackName, mid)
+
+					// Use the addNewTrackAfterPublish function to update track info on the contract
+					location := "local" // Default location value
+					isPublished := true // Default isPublished value
+
+					txHash, err := h.smCallManager.AddNewTrackAfterPublish(
+						roomID,
+						sender,
+						sessionID,
+						trackName,
+						mid,
+						location,
+						isPublished,
+					)
+
+					if err != nil {
+						log.Printf("Error adding track to smart contract: %v", err)
+					} else {
+						log.Printf("Successfully added track to smart contract, txHash: %s", txHash)
+					}
+				}
+			}
+		}
+	}
+
 	// Send response back to frontend
 	responseData := map[string]interface{}{
 		"type":               "publish-track-response",

@@ -6,6 +6,8 @@
     <title>Check Your Devices</title>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -283,11 +285,53 @@
         </div>
     </div>
 
-    <script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/webrtc-adapter/8.1.2/adapter.min.js"></script>
+    <script type="module">
+        import CloudflareCalls from './js/CloudflareCalls.js';
+        import { auth } from './js/auth.js';
+        import SmartContractConnector from './js/smartContractIntegration.js';
+
         let stream = null;
         let audioContext = null;
         let audioAnalyser = null;
-        
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Get stored information from localStorage
+            const username = localStorage.getItem('username');
+            const roomId = localStorage.getItem('roomId');
+            const privateKey = localStorage.getItem('privateKey');
+
+            // Display stored information
+            document.getElementById('usernameDisplay').textContent = username || 'Not set';
+            document.getElementById('roomIdDisplay').textContent = roomId || 'Not set';
+
+            // If we have a private key, connect automatically
+            if (privateKey) {
+                try {
+                    const result = await auth.connect(privateKey);
+                    if (!result.success) {
+                        alert('Failed to reconnect wallet. Please go back and try again.');
+                        window.location.href = 'index.html';
+                        return;
+                    }
+                    await SmartContractConnector.initialize();
+                } catch (error) {
+                    console.error('Error reconnecting wallet:', error);
+                    alert('Failed to reconnect wallet. Please go back and try again.');
+                    window.location.href = 'index.html';
+                    return;
+                }
+            } else {
+                alert('No wallet connection found. Please go back and connect your wallet.');
+                window.location.href = 'index.html';
+                return;
+            }
+
+            // Initialize devices
+            await initializeDevices();
+        });
+
         // Get stored information from localStorage
         const username = localStorage.getItem('username');
         const roomId = localStorage.getItem('roomId');
@@ -443,6 +487,14 @@
 
         // Join meeting handler
         document.getElementById('joinMeetingBtn').onclick = () => {
+            // Ensure we have all necessary data
+            const privateKey = localStorage.getItem('privateKey');
+            if (!privateKey) {
+                alert('No wallet connection found. Please go back and connect your wallet.');
+                window.location.href = 'index.html';
+                return;
+            }
+
             // Store selected devices and their states
             const deviceSettings = {
                 audioDeviceId: document.getElementById('audioSelect').value,
@@ -461,11 +513,8 @@
             }
 
             // Navigate to meeting room
-            window.location.href = `room.html`;
+            window.location.href = 'room.html';
         };
-
-        // Initialize on page load
-        initializeDevices();
 
         // Cleanup on page unload
         window.onbeforeunload = () => {

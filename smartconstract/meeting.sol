@@ -13,6 +13,13 @@ contract DAppMeeting {
 
     }
 
+    struct ParticipantDetails {
+        address walletAddress;  // Địa chỉ ví của người tham gia
+        string name;            // Tên của người tham gia
+        string sessionID;       // ID phiên từ Cloudflare Calls
+        Track[] tracks;         // Danh sách track của người tham gia
+    }
+
     struct Participant {
         address walletAddress;  // Participant's wallet address
         string name;            // Participant's name
@@ -197,5 +204,42 @@ contract DAppMeeting {
     function getParticipantTracksCount(string memory _roomId, address _participant) public view roomExists(_roomId) returns (uint) {
         require(participantsInRoom[_roomId][_participant], "Participant not in room");
         return participantTrackCount[_roomId][_participant];
+    }
+
+    // Hàm trả về danh sách đầy đủ thông tin về tất cả người tham gia trong phòng
+    function getRoomParticipantsDetails(string memory _roomId) public view roomExists(_roomId) returns (ParticipantDetails[] memory) {
+        uint participantCount = rooms[_roomId].participants.length;
+        ParticipantDetails[] memory details = new ParticipantDetails[](participantCount);
+        
+        for (uint i = 0; i < participantCount; i++) {
+            Participant memory participant = rooms[_roomId].participants[i];
+            address participantAddress = participant.walletAddress;
+            
+            // Tạo một đối tượng ParticipantDetails mới
+            details[i] = ParticipantDetails({
+                walletAddress: participantAddress,
+                name: participant.name,
+                sessionID: participant.sessionID,
+                tracks: participantTracks[_roomId][participantAddress]
+            });
+        }
+        
+        return details;
+    }
+    
+    function addNewTrackAfterPublish (string memory _roomId, address _participant, string memory _sessionId, string memory _trackName, string memory _mid, string memory _location, bool _isPublished) public roomExists(_roomId) {
+        require(participantsInRoom[_roomId][_participant], "Participant not in room");
+        
+        Track memory newTrack = Track({
+            trackName: _trackName,
+            mid: _mid,
+            location: _location,
+            isPublished: _isPublished,
+            sessionId: _sessionId,
+            roomId: _roomId
+        });
+        participantTracks[_roomId][_participant].push(newTrack);
+        participantTrackCount[_roomId][_participant]++;
+        emit TrackAdded(_roomId, _participant, _trackName);
     }
 }

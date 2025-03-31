@@ -7,6 +7,8 @@
     <title>Video Meeting Room</title>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -170,6 +172,75 @@
                 font-size: 14px;
             }
         }
+
+        .wallet-btn {
+            background: #FF9800;
+            color: white;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .wallet-btn:hover {
+            background: #F57C00;
+        }
+
+        .wallet-status {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+            margin-bottom: 20px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            font-size: 14px;
+        }
+
+        .wallet-status.connected {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .wallet-status i {
+            margin-right: 8px;
+        }
+
+        .disabled-btn {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .wallet-btn-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .wallet-btn {
+            background: #FF9800;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            flex: 1;
+        }
+
+        .switch-wallet-btn {
+            background: #2196F3;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            flex: 1;
+        }
+
+        .switch-wallet-btn:hover {
+            background: #1976D2;
+        }
     </style>
 </head>
 
@@ -177,6 +248,22 @@
     <div class="app-container">
         <div id="joinForm" class="join-form">
             <h2>Video Meeting</h2>
+
+            <div id="walletStatus" class="wallet-status">
+                <i class="material-icons">account_balance_wallet</i>
+                <span>Wallet not connected</span>
+            </div>
+
+            <div class="form-group">
+                <input type="password" id="privateKeyInput" placeholder="Enter your private key" required>
+                <small style="color: #666; margin-top: 5px; display: block;">Your private key is stored locally and used only for signing transactions</small>
+            </div>
+
+            <button id="connectWalletBtn" class="wallet-btn">
+                <i class="material-icons">account_balance_wallet</i>
+                Connect Wallet
+            </button>
+
             <div class="form-group">
                 <input type="text" id="usernameInput" placeholder="Enter your name" required>
             </div>
@@ -184,8 +271,8 @@
                 <input type="text" id="meetingTitleInput" placeholder="Meeting title (optional)">
             </div>
             <div class="button-group">
-                <button id="createMeetingBtn" class="primary-btn">Start Meeting</button>
-                <button onclick="window.location.href='join.html'" class="secondary-btn">Join Meeting</button>
+                <button id="createMeetingBtn" class="primary-btn disabled-btn" disabled>Start Meeting</button>
+                <button id="joinExistingBtn" class="secondary-btn disabled-btn" disabled>Join Meeting</button>
             </div>
         </div>
         <div id="roomInfo">
@@ -210,101 +297,205 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/webrtc-adapter/8.1.2/adapter.min.js"></script>
     <script type="module">
         import CloudflareCalls from './js/CloudflareCalls.js';
+        import { auth } from './js/auth.js';
+        import SmartContractConnector from './js/smartContractIntegration.js';
 
         // Lấy current URL và cấu hình endpoints
+        // const currentUrl = 'https://manhteky123-dappmeetingv3.hf.space';
         const currentUrl = window.location.origin;
         const isLocalhost = currentUrl.includes('localhost') || currentUrl.includes('127.0.0.1');
 
         // Cấu hình endpoints dựa trên môi trường
         const config = {
-            backendUrl: isLocalhost ? 'http://localhost:60000' : currentUrl,
+            backendUrl: isLocalhost ? 'http://localhost:50000' : currentUrl,
             websocketUrl: isLocalhost
                 ? 'ws://localhost:50000/ws'
-                : currentUrl.replace('http', 'ws').replace('https', 'wss') + '/ws',
-            backendUrl2: isLocalhost ? 'http://localhost:60000' : currentUrl,
-            websocketUrl2: isLocalhost
-                ? 'ws://localhost:60000/ws'
-                : currentUrl.replace('http', 'ws').replace('https', 'wss') + '/ws',
+                : 'wss://manhteky123-dappmeetingv3.hf.space/ws'
         };
+        const baseAPI = isLocalhost ? 'http://localhost:50000' : 'https://manhteky123-dappmeetingv3.hf.space';
 
         console.log('Using endpoints:', config);
 
         const calls = new CloudflareCalls(config);
-
-        const baseAPI = isLocalhost ? 'http://localhost:60000' : currentUrl;
         const usernameInput = document.getElementById('usernameInput');
         const meetingTitleInput = document.getElementById('meetingTitleInput');
+        const privateKeyInput = document.getElementById('privateKeyInput');
         const createMeetingBtn = document.getElementById('createMeetingBtn');
+        const joinExistingBtn = document.getElementById('joinExistingBtn');
         const roomInfo = document.getElementById('roomInfo');
         const roomIdDisplay = document.getElementById('roomIdDisplay');
         const copyButton = document.getElementById('copyButton');
         const goToMeetingBtn = document.getElementById('goToMeetingBtn');
-        // Get token and initialize calls
-        async function ensureInitialized(username,cb) {
-            // if (!calls.token) {
-                try {
-                    sessionStorage.removeItem('token');
-                    calls.inauthtoken(username,cb);
-                    // const response = await fetch(`${baseAPI}/auth/token`, {
-                    //     method: 'POST',
-                    //     headers: {
-                    //         'Content-Type': 'application/json'
-                    //     },
-                    //     body: JSON.stringify({ username })
-                    // });
+        const connectWalletBtn = document.getElementById('connectWalletBtn');
+        const walletStatus = document.getElementById('walletStatus');
 
-                    // const { token } = await response.json();
-                    // calls.setToken(token);
-                    // return true;
-                } catch (err) {
-                    console.error('Error getting token:', err);
-                    alert('Failed to initialize. Please check if the server is running.');
-                    return false;
+        // Connect using private key
+        async function connectWallet() {
+            const privateKey = privateKeyInput.value.trim();
+            localStorage.setItem('privateKey', privateKey); 
+            if (!privateKey) {
+                alert('Please enter your private key');
+                return;
+            }
+
+            try {
+                const result = await auth.connect(privateKey);
+                if (result.success) {
+                    updateWalletUI(true);
+                    // Initialize smart contract connector
+                    await SmartContractConnector.initialize();
+                } else {
+                    alert('Failed to connect wallet: ' + result.error);
                 }
+            } catch (error) {
+                console.error('Error connecting wallet:', error);
+                alert('Error connecting wallet: Invalid private key');
+            }
+        }
+
+        // Update UI based on wallet connection status
+        function updateWalletUI(isConnected) {
+            if (isConnected) {
+                walletStatus.classList.add('connected');
+                walletStatus.innerHTML = `
+                    <i class="material-icons">check_circle</i>
+                    <span>Connected: ${auth.getShortAddress()}</span>
+                `;
+                privateKeyInput.disabled = true;
+                connectWalletBtn.style.display = 'none';
+
+                // Enable meeting buttons
+                createMeetingBtn.classList.remove('disabled-btn');
+                createMeetingBtn.disabled = false;
+                joinExistingBtn.classList.remove('disabled-btn');
+                joinExistingBtn.disabled = false;
+            } else {
+                walletStatus.classList.remove('connected');
+                walletStatus.innerHTML = `
+                    <i class="material-icons">account_balance_wallet</i>
+                    <span>Wallet not connected</span>
+                `;
+                privateKeyInput.disabled = false;
+                connectWalletBtn.style.display = 'flex';
+
+                // Disable meeting buttons
+                createMeetingBtn.classList.add('disabled-btn');
+                createMeetingBtn.disabled = true;
+                joinExistingBtn.classList.add('disabled-btn');
+                joinExistingBtn.disabled = true;
+            }
+        }
+
+        // Get token and initialize calls
+        async function ensureInitialized(username) {
+            // if (!calls.token) {
+            //     try {
+            //         const response = await fetch(`${baseAPI}/auth/token`, {
+            //             method: 'POST',
+            //             headers: {
+            //                 'Content-Type': 'application/json'
+            //             },
+            //             body: JSON.stringify({
+            //                 username,
+            //                 walletAddress: auth.userAddress // Add wallet address to user info
+            //             })
+            //         });
+
+            //         const { token } = await response.json();
+            //         calls.setToken(token);
+            //         return true;
+            //     } catch (err) {
+            //         console.error('Error getting token:', err);
+            //         alert('Failed to initialize. Please check if the server is running.');
+            //         return false;
+            //     }
             // }
             return true;
         }
 
         async function createRoom() {
+            if (!auth.isConnected) {
+                alert('Please connect your wallet first');
+                return;
+            }
+
             if (!usernameInput.value) {
                 alert('Please enter your name');
                 return;
             }
 
             try {
-                !await ensureInitialized(usernameInput.value,async (issuccess) => {
-                    if (!issuccess) {
-                        return;
-                    }
-                    await calls.createRoom({
-                    name: meetingTitleInput.value || `${usernameInput.value}'s Room`,
-                    metadata: { createdBy: usernameInput.value }
-                }, (roomId) => {
-                    console.log('Room created:', roomId);
-                    // Store username in localStorage for the meeting room
-                    localStorage.setItem('username', usernameInput.value);
-
-                    // Display room info
-                    roomIdDisplay.textContent = roomId;
-                    roomInfo.style.display = 'block';
-
-                    // Store room ID in localStorage
-                    localStorage.setItem('roomId', roomId);
-                });
-                });
                 // Initialize calls
-                // Create room
-                
+                if (!await ensureInitialized(usernameInput.value)) {
+                    return;
+                }
 
+                // Generate room details
+                const roomId = generateUUID(); // Generate a unique room ID
+                const roomName = meetingTitleInput.value || `${usernameInput.value}'s Room`;
+                const roomMetadata = JSON.stringify({
+                    createdBy: usernameInput.value,
+                    walletAddress: auth.userAddress,
+                    createdAt: new Date().toISOString()
+                });
+
+                // Show loading state
+                createMeetingBtn.disabled = true;
+                createMeetingBtn.textContent = "Creating room...";
+
+                // Call smart contract
+                const contractResult = await SmartContractConnector.createRoom(roomId, roomName, roomMetadata);
+                console.log("Smart contract room creation result:", contractResult);
+
+                // Store in local CloudflareCalls state (without API call)
+                const room = {
+                    roomId: roomId,
+                    name: roomName,
+                    metadata: JSON.parse(roomMetadata)
+                };
+
+                // Store username in localStorage for the meeting room
+                localStorage.setItem('username', usernameInput.value);
+
+                // Display room info
+                roomIdDisplay.textContent = roomId;
+                roomInfo.style.display = 'block';
+
+                // Store room ID in localStorage
+                localStorage.setItem('roomId', roomId);
+
+                // Reset button state
+                createMeetingBtn.disabled = false;
+                createMeetingBtn.textContent = "Start Meeting";
 
             } catch (err) {
                 console.error('Error creating room:', err);
                 alert('Failed to create room: ' + err.message);
+
+                // Reset button state
+                createMeetingBtn.disabled = false;
+                createMeetingBtn.textContent = "Start Meeting";
             }
         }
 
+        // Helper function to generate UUID for room ID
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
         // Event Listeners
+        connectWalletBtn.addEventListener('click', connectWallet);
         createMeetingBtn.addEventListener('click', createRoom);
+        joinExistingBtn.addEventListener('click', () => {
+            if (!auth.isConnected) {
+                alert('Please connect your wallet first');
+                return;
+            }
+            window.location.href = 'join.html';
+        });
 
         copyButton.addEventListener('click', () => {
             navigator.clipboard.writeText(roomIdDisplay.textContent)
@@ -315,10 +506,12 @@
         goToMeetingBtn.addEventListener('click', () => {
             window.location.href = './check.html';
         });
-    </script>
-    <script src=""></script>
-    <script type="module" src="js/CloudflareCalls.js"></script>
 
+        // Initialize UI
+        document.addEventListener('DOMContentLoaded', () => {
+            updateWalletUI(false);
+        });
+    </script>
 </body>
 
 </html>

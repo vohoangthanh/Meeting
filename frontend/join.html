@@ -1,12 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Join Meeting Room</title>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -34,7 +35,7 @@
             background: rgba(255, 255, 255, 0.95);
             padding: 40px;
             border-radius: 20px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
             backdrop-filter: blur(10px);
         }
 
@@ -64,7 +65,7 @@
         .form-group input:focus {
             border-color: #667eea;
             outline: none;
-            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+            box-shadow: 0 0 0 4px rgba(102,126,234,0.1);
         }
 
         .button-group {
@@ -98,11 +99,50 @@
 
         .primary-btn:hover {
             transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+            box-shadow: 0 5px 15px rgba(102,126,234,0.4);
         }
 
         .secondary-btn:hover {
             background: #d5d5d5;
+        }
+
+        .wallet-btn {
+            background: #FF9800;
+            color: white;
+            margin-bottom: 25px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        
+        .wallet-btn:hover {
+            background: #F57C00;
+        }
+        
+        .wallet-status {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+            margin-bottom: 20px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            font-size: 14px;
+        }
+        
+        .wallet-status.connected {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        
+        .wallet-status i {
+            margin-right: 8px;
+        }
+        
+        .disabled-btn {
+            opacity: 0.6;
+            cursor: not-allowed;
         }
 
         @media (max-width: 480px) {
@@ -124,13 +164,58 @@
                 font-size: 14px;
             }
         }
+        
+        .wallet-btn-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 25px;
+        }
+        
+        .wallet-btn {
+            background: #FF9800;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            flex: 1;
+        }
+        
+        .switch-wallet-btn {
+            background: #2196F3;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            flex: 1;
+        }
+        
+        .switch-wallet-btn:hover {
+            background: #1976D2;
+        }
     </style>
 </head>
-
 <body>
     <div class="app-container">
         <div class="join-form">
             <h2>Join Meeting</h2>
+            
+            <div id="walletStatus" class="wallet-status">
+                <i class="material-icons">account_balance_wallet</i>
+                <span>Wallet not connected</span>
+            </div>
+            
+            <div class="form-group">
+                <input type="password" id="privateKeyInput" placeholder="Enter your private key" required>
+                <small style="color: #666; margin-top: 5px; display: block;">Your private key is stored locally and used only for signing transactions</small>
+            </div>
+
+            <button id="connectWalletBtn" class="wallet-btn">
+                <i class="material-icons">account_balance_wallet</i>
+                Connect Wallet
+            </button>
+            
             <div class="form-group">
                 <input type="text" id="usernameInput" placeholder="Enter your name" required>
             </div>
@@ -139,7 +224,7 @@
             </div>
             <div class="button-group">
                 <button class="secondary-btn" onclick="window.location.href='index.html'">Back</button>
-                <button id="joinMeetingBtn" class="primary-btn">Join Meeting</button>
+                <button id="joinMeetingBtn" class="primary-btn disabled-btn" disabled>Join Meeting</button>
             </div>
         </div>
     </div>
@@ -147,85 +232,135 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/webrtc-adapter/8.1.2/adapter.min.js"></script>
     <script type="module">
         import CloudflareCalls from './js/CloudflareCalls.js';
-
+        import { auth } from './js/auth.js';
+        import SmartContractConnector from './js/smartContractIntegration.js';
         // Lấy current URL và cấu hình endpoints
         const currentUrl = window.location.origin;
         const isLocalhost = currentUrl.includes('localhost') || currentUrl.includes('127.0.0.1');
-
-        // Cấu hình endpoints dựa trên môi trường
+        
         const config = {
-            backendUrl: isLocalhost ? 'http://localhost:60000' : currentUrl,
-            websocketUrl: isLocalhost
-                ? 'ws://localhost:50000/ws'
-                : currentUrl.replace('http', 'ws').replace('https', 'wss') + '/ws',
-            backendUrl2: isLocalhost ? 'http://localhost:60000' : currentUrl,
-            websocketUrl2: isLocalhost
-                ? 'ws://localhost:60000/ws'
-                : currentUrl.replace('http', 'ws').replace('https', 'wss') + '/ws',
+            backendUrl: isLocalhost ? 'http://localhost:50000' : currentUrl,
+            websocketUrl: isLocalhost 
+                ? 'ws://localhost:50000/ws' 
+                : 'wss://manhteky123-dappmeetingv3.hf.space/ws'
         };
-        const baseAPI = isLocalhost ? 'http://localhost:60000' : currentUrl;
+        const baseAPI = isLocalhost ? 'http://localhost:50000' : 'https://manhteky123-dappmeetingv3.hf.space';
         const calls = new CloudflareCalls(config);
 
         const usernameInput = document.getElementById('usernameInput');
         const roomIdInput = document.getElementById('roomIdInput');
+        const privateKeyInput = document.getElementById('privateKeyInput');
         const joinMeetingBtn = document.getElementById('joinMeetingBtn');
-        let isSubmit = false;
+        const connectWalletBtn = document.getElementById('connectWalletBtn');
+        const walletStatus = document.getElementById('walletStatus');
+        
+        // Connect using private key
+        async function connectWallet() {
+            const privateKey = privateKeyInput.value.trim();
+            localStorage.setItem('privateKey', privateKey); 
+            if (!privateKey) {
+                alert('Please enter your private key');
+                return;
+            }
+
+            try {
+                const result = await auth.connect(privateKey);
+                if (result.success) {
+                    updateWalletUI(true);
+                    // Initialize smart contract connector
+                    await SmartContractConnector.initialize();
+                } else {
+                    alert('Failed to connect wallet: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Error connecting wallet:', error);
+                alert('Error connecting wallet: Invalid private key');
+            }
+        }
+        
+        // Update UI based on wallet connection status
+        function updateWalletUI(isConnected) {
+            if (isConnected) {
+                walletStatus.classList.add('connected');
+                walletStatus.innerHTML = `
+                    <i class="material-icons">check_circle</i>
+                    <span>Connected: ${auth.getShortAddress()}</span>
+                `;
+                privateKeyInput.disabled = true;
+                connectWalletBtn.style.display = 'none';
+                
+                // Enable join button
+                joinMeetingBtn.classList.remove('disabled-btn');
+                joinMeetingBtn.disabled = false;
+            } else {
+                walletStatus.classList.remove('connected');
+                walletStatus.innerHTML = `
+                    <i class="material-icons">account_balance_wallet</i>
+                    <span>Wallet not connected</span>
+                `;
+                privateKeyInput.disabled = false;
+                connectWalletBtn.style.display = 'flex';
+                
+                // Disable join button
+                joinMeetingBtn.classList.add('disabled-btn');
+                joinMeetingBtn.disabled = true;
+            }
+        }
 
         // Get token and initialize calls
-        async function ensureInitialized(username, cb) {
+        async function ensureInitialized(username) {
             // if (!calls.token) {
-            console.log('Getting token...');
-            try {
-                sessionStorage.removeItem('token');
-                calls.inauthtoken(username, cb);
-            console.log('inauthtoken token...');
-                
-                // const response = await fetch(`${baseAPI}/auth/token`, {
-                //     method: 'POST',
-                //     headers: {
-                //         'Content-Type': 'application/json'
-                //     },
-                //     body: JSON.stringify({ username })
-                // });
-
-                // const { token } = await response.json();
-                // calls.setToken(token);
-                // return true;
-            } catch (err) {
-                console.error('Error getting token:', err);
-                alert('Failed to initialize. Please check if the server is running.');
-                return false;
-            }
+            //     try {
+            //         const response = await fetch(`${baseAPI}/auth/token`, {
+            //             method: 'POST',
+            //             headers: {
+            //                 'Content-Type': 'application/json'
+            //             },
+            //             body: JSON.stringify({ 
+            //                 username,
+            //                 walletAddress: auth.userAddress
+            //             })
+            //         });
+                    
+            //         const { token } = await response.json();
+            //         calls.setToken(token);
+            //         return true;
+            //     } catch (err) {
+            //         console.error('Error getting token:', err);
+            //         alert('Failed to initialize. Please check if the server is running.');
+            //         return false;
+            //     }
             // }
             return true;
         }
 
         async function joinMeeting() {
-            if(isSubmit == true){
+            if (!auth.isConnected()) {
+                alert('Please connect your wallet first');
                 return;
             }
+            
             const username = usernameInput.value.trim();
             const roomId = roomIdInput.value.trim();
-            
+
             if (!username || !roomId) {
                 alert('Please enter both your name and Room ID');
                 return;
             }
-            isSubmit = true;
-            console.log('username :', username);
+
             try {
                 // Initialize calls
-                await ensureInitialized(username, () => {
-                    console.log('done'); 
-                        localStorage.setItem('username', username);
-                        localStorage.setItem('roomId', roomId);
+                if (!await ensureInitialized(username)) {
+                    return;
+                }
+                
+                // Store information in localStorage
+                localStorage.setItem('username', username);
+                localStorage.setItem('roomId', roomId);
+                localStorage.setItem('privateKey', privateKeyInput.value.trim());
 
-                        // Redirect to device check page
-                        window.location.href = './check.html';
-                        return;
-                    
-                });
-
+                // Redirect to device check page
+                window.location.href = './check.html';
             } catch (err) {
                 console.error('Error joining room:', err);
                 alert('Failed to join room: ' + err.message);
@@ -233,15 +368,20 @@
         }
 
         // Event Listeners
+        connectWalletBtn.addEventListener('click', connectWallet);
         joinMeetingBtn.addEventListener('click', joinMeeting);
 
         // Handle enter key
         document.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !joinMeetingBtn.disabled) {
                 joinMeeting();
             }
         });
+        
+        // Initialize UI
+        document.addEventListener('DOMContentLoaded', () => {
+            updateWalletUI(false);
+        });
     </script>
 </body>
-
 </html>
