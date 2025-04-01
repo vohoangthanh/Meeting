@@ -1,6 +1,8 @@
 import CloudflareCalls from './CloudflareCalls.js';
 import SmartContractConnector from './smartContractIntegration.js';
 import { auth } from './auth.js';
+import eventListener from './contractEventListener.js';
+
 import smartContractIntegration from './smartContractIntegration.js';
 
 // Lấy current URL và cấu hình endpoints
@@ -170,15 +172,54 @@ async function joinRoom() {
         await SmartContractConnector.initialize();
     }
 
+    // Thiết lập listener để nhận answer từ backend và establish peer connection
+    const removeAnswerListener = await SmartContractConnector.listenForTrackPublishedAnswer(
+        roomId,
+        async (answerData) => {
+            try {
+                console.log('Received track publish answer from backend:', answerData);
+                
+                if (answerData && answerData.sessionDescription) {
+                    // Tạo và thiết lập remote description từ answer
+                    if (calls.peerConnection && calls.peerConnection.signalingState === 'have-local-offer') {
+                        console.log('Setting remote description from backend answer');
+                        const remoteDesc = new RTCSessionDescription(answerData.sessionDescription);
+                        await calls.peerConnection.setRemoteDescription(remoteDesc);
+                        console.log('Remote description set successfully, peer connection established');
+                    } else if (calls.peerConnection) {
+                        console.warn(`Invalid signaling state for setRemoteDescription: ${calls.peerConnection.signalingState}`);
+                    } else {
+                        console.warn('PeerConnection not available');
+                    }
+                }
+            } catch (error) {
+                console.error('Error processing track publish answer:', error);
+            }
+        }
+    );
+
     // 2. Before joining the room via WebRTC, make sure to join via smart contract first
     // This ensures you're properly registered as a participant
     console.log('Joining room via smart contract first...');
     await SmartContractConnector.joinRoom(roomId, username, []);
     console.log('Successfully joined room via smart contract');
+    
     // 1. Join room và lấy session
     await calls.joinRoom(roomId, { name: username });
     currentRoom = roomId;
     showNotification(`Joined room: ${roomId}`);
+
+
+    // Đảm bảo event listener đã được khởi tạo
+    if (!eventListener) {
+        console.error('Event listener not initialized');
+        throw new Error('Event listener not initialized');
+    }
+
+
+    // Start listening for events from backend before proceeding
+    console.log('Starting to listen for backend events');
+    
 
     // 2. Setup handlers trước khi pull tracks
     setupCallbacks();
@@ -237,7 +278,6 @@ async function joinRoom() {
     });
 
     console.log('Peer Connection established:', calls.peerConnection.connectionState);
-    await notifyPullComplete();
 
     // 5. Set up remote streams for existing participants
     for (const participant of participants) {
@@ -246,30 +286,6 @@ async function joinRoom() {
 
         console.log('Processing participant:', participant);
 
-        // // Create container for this participant if not exists
-        // const containerId = `participant-${participant.sessionId}`;
-
-        // if (!document.getElementById(containerId)) {
-        //     const container = document.createElement('div');
-        //     container.id = containerId;
-        //     container.className = 'video-container';
-
-        //     const video = document.createElement('video');
-        //     video.autoplay = true;
-        //     video.playsInline = true;
-
-        //     const name = document.createElement('div');
-        //     name.className = 'participant-name';
-        //     name.textContent = participant.name || `participant-${participant.sessionId}`;
-
-        //     container.appendChild(video);
-        //     container.appendChild(name);
-        //     videoGrid.appendChild(container);
-
-        //     // Set up MediaStream for this participant
-        //     video.srcObject = new MediaStream();
-        // }
-
         // Pull each track from the participant
         for (const trackName of participant.publishedTracks) {
             console.log(`Pulling track ${trackName} from session ${participant.sessionId}`);
@@ -277,39 +293,36 @@ async function joinRoom() {
         }
     }
 
+    // Set session ID cho contract event listener
+    eventListener.setCurrentSessionId(calls.sessionId);
 
-    SmartContractConnector.contract.on("sendNotificationToRoom", (roomId, message) => {
-        console.log('Wave event received:', { roomId, message });
-        showNotification(`👋 ${message}`);
-    });
-
+    // Thiết lập các event listeners
+    const cleanupFunctions = [];
+    
+    // Lắng nghe sự kiện TrackAdded
+    cleanupFunctions.push(eventListener.listenForTrackAdded(
+        roomId,
+        async (participant, trackName, sessionId) => {
+            try {
+                console.log(`New track detected from ${participant}: ${trackName}`);
+                // Pull track về máy nếu không phải là track của chính mình
+                if (sessionId !== calls.sessionId) {
+                    await calls._pullTracks(sessionId, trackName);
+                } else {
+                    console.log('Ignoring own track:', trackName);
+                }
+            } catch (error) {
+                console.error('Error pulling track:', error);
+                showNotification(`Failed to pull track from ${participant}`, 'error');
+            }
+        }
+    ));
+    
     // 5. Start monitoring stats sau khi mọi thứ đã setup
     calls.startStatsMonitoring(1000);
 }
 
-// Function to notify others that you've pulled all tracks
-async function notifyPullComplete() {
-    try {
-        const wallet = new ethers.Wallet(localStorage.getItem('privateKey'));
-        // Get user address for event filtering
-        const userAddress = wallet.address;
-        // Get your published tracks
-        const myTracks = calls.localStream ?
-            calls.localStream.getTracks().map(track => track.id) : [];
-        // If no tracks, still pass an empty array
-        const tracksArray = Array.isArray(myTracks) ? myTracks : [myTracks];
 
-        await SmartContractConnector.notifyTrackPullComplete(
-            roomId,
-            userAddress,
-            calls.sessionId,
-            tracksArray
-        );
-        console.log("Notified other participants about my tracks");
-    } catch (error) {
-        console.error("Error notifying track pull complete:", error);
-    }
-}
 async function checkAndRestoreEventListeners() {
     // const reconnected = await SmartContractConnector.reestablishEventListeners();
     const reconnected = true;

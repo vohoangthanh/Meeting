@@ -158,11 +158,23 @@ func (cs *CloudflareService) PublishTracks(sessionID string, offer map[string]in
 }
 
 // PullTracks pulls tracks from a remote session
-func (cs *CloudflareService) PullTracks(sessionID string, remoteTracks []map[string]interface{}) (map[string]interface{}, error) {
-	url := fmt.Sprintf("/sessions/%s/tracks/new", sessionID)
+func (cs *CloudflareService) PullTracks(sessionID string, tracks []map[string]interface{}) (map[string]interface{}, error) {
+	// Validate tracks format
+	for _, track := range tracks {
+		if _, ok := track["trackName"]; !ok {
+			return nil, fmt.Errorf("trackName must be present in track data")
+		}
+		if _, ok := track["location"]; !ok {
+			track["location"] = "remote"
+		}
+		if _, ok := track["sessionId"]; !ok {
+			return nil, fmt.Errorf("sessionId must be present when pulling remote tracks")
+		}
+	}
 
+	url := fmt.Sprintf("/sessions/%s/tracks/new", sessionID)
 	requestBody := map[string]interface{}{
-		"tracks": remoteTracks,
+		"tracks": tracks,
 	}
 
 	return cs.makeCloudflareRequest("POST", url, requestBody)

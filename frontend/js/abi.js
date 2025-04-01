@@ -156,6 +156,12 @@ export const CONTRACT_ABI= [
 				"internalType": "string",
 				"name": "trackName",
 				"type": "string"
+			},
+			{
+				"indexed": false,
+				"internalType": "string",
+				"name": "sessionId",
+				"type": "string"
 			}
 		],
 		"name": "TrackAdded",

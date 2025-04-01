@@ -232,6 +232,32 @@ func (h *EventHandler) handlePublishTrack(roomID string, sender common.Address, 
 		return
 	}
 
+	// Send response back to frontend
+	responseData := map[string]interface{}{
+		"type": "publish-track-response",
+		"cloudflareResponse": map[string]interface{}{
+			"sessionDescription": response["sessionDescription"],
+			"tracks":             response["tracks"],
+			"txHash":             response["txHash"],
+		},
+	}
+
+	responseBytes, err := json.Marshal(responseData)
+	if err != nil {
+		log.Printf("Error marshaling response: %v", err)
+		return
+	}
+
+	// Forward the response to the frontend
+	txHash, err := h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
+	if err != nil {
+		log.Printf("Error forwarding response to frontend: %v", err)
+		return
+	}
+
+	// Log the successful response with the actual transaction hash
+	log.Printf("Successfully handled publish-track event for %s, txHash: %s", sender.Hex(), txHash)
+
 	// Update session ID in the smart contract
 	_, err = h.smCallManager.SetParticipantSessionID(roomID, sender, sessionID)
 	if err != nil {
@@ -285,31 +311,15 @@ func (h *EventHandler) handlePublishTrack(roomID string, sender common.Address, 
 			}
 		}
 	}
-
-	// Send response back to frontend
-	responseData := map[string]interface{}{
-		"type":               "publish-track-response",
-		"cloudflareResponse": response,
-	}
-
-	responseBytes, err := json.Marshal(responseData)
-	if err != nil {
-		log.Printf("Error marshaling response: %v", err)
-		return
-	}
-
-	// Forward the response to the frontend
-	_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
-	if err != nil {
-		log.Printf("Error forwarding response to frontend: %v", err)
-	}
 }
 
 // handlePullTrack processes pull track events from smart contract
 func (h *EventHandler) handlePullTrack(roomID string, sender common.Address, eventData map[string]interface{}) {
 	log.Printf("Handling pull track event for room %s from participant %s", roomID, sender.Hex())
 
+	// Extract session IDs and track data
 	var sessionID string
+	var remoteSessionId string
 	var tracks []map[string]interface{}
 
 	// Check for compressed data format first
@@ -335,27 +345,42 @@ func (h *EventHandler) handlePullTrack(roomID string, sender common.Address, eve
 		sessionID = pullData.SessionId
 		tracks = pullData.Tracks
 	} else {
-		// Extract information directly from eventData
-		if sid, ok := eventData["sessionID"].(string); ok {
+		// Extract directly from eventData
+		if sid, ok := eventData["sessionId"].(string); ok {
 			sessionID = sid
 		} else {
-			log.Printf("Missing sessionID in pull-track event")
+			log.Printf("Missing sessionId in pull-track event")
 			return
 		}
 
-		// Extract tracks from eventData
-		if t, ok := eventData["tracks"].([]interface{}); ok {
-			tracks = make([]map[string]interface{}, len(t))
-			for i, track := range t {
-				if trackMap, ok := track.(map[string]interface{}); ok {
-					tracks[i] = trackMap
-				} else {
-					log.Printf("Invalid track format in pull-track event at index %d", i)
-				}
+		// Get remote session ID
+		if rsid, ok := eventData["remoteSessionId"].(string); ok {
+			remoteSessionId = rsid
+		} else {
+			log.Printf("Missing remoteSessionId in pull-track event")
+			return
+		}
+
+		// Get track name and construct track data
+		if trackName, ok := eventData["trackName"].(string); ok {
+			tracks = []map[string]interface{}{
+				{
+					"trackName": trackName,
+					"location":  "remote",
+					"sessionId": remoteSessionId,
+				},
 			}
 		} else {
-			log.Printf("Missing or invalid tracks in pull-track event")
+			log.Printf("Missing trackName in pull-track event")
 			return
+		}
+	}
+
+	// Ensure all tracks have the required fields
+	for _, track := range tracks {
+		track["location"] = "remote"
+		if _, ok := track["sessionId"]; !ok {
+			track["sessionId"] = remoteSessionId
 		}
 	}
 
@@ -385,25 +410,42 @@ func (h *EventHandler) handlePullTrack(roomID string, sender common.Address, eve
 		return
 	}
 
-	// Send success response back to frontend
-	responseData := map[string]interface{}{
-		"type":               "pull-track-response",
-		"cloudflareResponse": response,
-	}
-
-	responseBytes, err := json.Marshal(responseData)
-	if err != nil {
-		log.Printf("Error marshaling response: %v", err)
-		return
-	}
-
-	// Forward the response to the frontend
-	_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
-	if err != nil {
-		log.Printf("Error forwarding response to frontend: %v", err)
+	// Check if renegotiation is needed based on Cloudflare response
+	if sdp, ok := response["sessionDescription"].(map[string]interface{}); ok {
+		responseData := map[string]interface{}{
+			"type":                           "pull-track-response",
+			"cloudflareResponse":             response,
+			"requiresImmediateRenegotiation": true,
+			"sessionDescription":             sdp,
+		}
+		responseBytes, err := json.Marshal(responseData)
+		if err != nil {
+			log.Printf("Error marshaling response with renegotiation: %v", err)
+			return
+		}
+		_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
+		if err != nil {
+			log.Printf("Error forwarding renegotiation response: %v", err)
+		}
+	} else {
+		// Send normal success response if no renegotiation needed
+		responseData := map[string]interface{}{
+			"type":               "pull-track-response",
+			"cloudflareResponse": response,
+		}
+		responseBytes, err := json.Marshal(responseData)
+		if err != nil {
+			log.Printf("Error marshaling response: %v", err)
+			return
+		}
+		_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
+		if err != nil {
+			log.Printf("Error forwarding response: %v", err)
+		}
 	}
 }
 
+// handleCloseTrack processes close track events from smart contract
 func (h *EventHandler) handleCloseTrack(roomID string, sender common.Address, eventData map[string]interface{}) {
 	// Implementation for closing tracks
 	sessionID, ok := eventData["sessionID"].(string)

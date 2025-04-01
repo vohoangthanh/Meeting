@@ -234,17 +234,17 @@
         import CloudflareCalls from './js/CloudflareCalls.js';
         import { auth } from './js/auth.js';
         import SmartContractConnector from './js/smartContractIntegration.js';
-        // Lấy current URL và cấu hình endpoints
+
         const currentUrl = window.location.origin;
         const isLocalhost = currentUrl.includes('localhost') || currentUrl.includes('127.0.0.1');
-        
+
         const config = {
             backendUrl: isLocalhost ? 'http://localhost:50000' : currentUrl,
-            websocketUrl: isLocalhost 
-                ? 'ws://localhost:50000/ws' 
+            websocketUrl: isLocalhost
+                ? 'ws://localhost:50000/ws'
                 : 'wss://manhteky123-dappmeetingv3.hf.space/ws'
         };
-        const baseAPI = isLocalhost ? 'http://localhost:50000' : 'https://manhteky123-dappmeetingv3.hf.space';
+
         const calls = new CloudflareCalls(config);
 
         const usernameInput = document.getElementById('usernameInput');
@@ -253,11 +253,10 @@
         const joinMeetingBtn = document.getElementById('joinMeetingBtn');
         const connectWalletBtn = document.getElementById('connectWalletBtn');
         const walletStatus = document.getElementById('walletStatus');
-        
-        // Connect using private key
+
         async function connectWallet() {
             const privateKey = privateKeyInput.value.trim();
-            localStorage.setItem('privateKey', privateKey); 
+
             if (!privateKey) {
                 alert('Please enter your private key');
                 return;
@@ -266,8 +265,8 @@
             try {
                 const result = await auth.connect(privateKey);
                 if (result.success) {
+                    localStorage.setItem('privateKey', privateKey);
                     updateWalletUI(true);
-                    // Initialize smart contract connector
                     await SmartContractConnector.initialize();
                 } else {
                     alert('Failed to connect wallet: ' + result.error);
@@ -277,8 +276,7 @@
                 alert('Error connecting wallet: Invalid private key');
             }
         }
-        
-        // Update UI based on wallet connection status
+
         function updateWalletUI(isConnected) {
             if (isConnected) {
                 walletStatus.classList.add('connected');
@@ -288,8 +286,7 @@
                 `;
                 privateKeyInput.disabled = true;
                 connectWalletBtn.style.display = 'none';
-                
-                // Enable join button
+
                 joinMeetingBtn.classList.remove('disabled-btn');
                 joinMeetingBtn.disabled = false;
             } else {
@@ -300,46 +297,18 @@
                 `;
                 privateKeyInput.disabled = false;
                 connectWalletBtn.style.display = 'flex';
-                
-                // Disable join button
+
                 joinMeetingBtn.classList.add('disabled-btn');
                 joinMeetingBtn.disabled = true;
             }
         }
 
-        // Get token and initialize calls
-        async function ensureInitialized(username) {
-            // if (!calls.token) {
-            //     try {
-            //         const response = await fetch(`${baseAPI}/auth/token`, {
-            //             method: 'POST',
-            //             headers: {
-            //                 'Content-Type': 'application/json'
-            //             },
-            //             body: JSON.stringify({ 
-            //                 username,
-            //                 walletAddress: auth.userAddress
-            //             })
-            //         });
-                    
-            //         const { token } = await response.json();
-            //         calls.setToken(token);
-            //         return true;
-            //     } catch (err) {
-            //         console.error('Error getting token:', err);
-            //         alert('Failed to initialize. Please check if the server is running.');
-            //         return false;
-            //     }
-            // }
-            return true;
-        }
-
         async function joinMeeting() {
-            if (!auth.isConnected()) {
+            if (!auth.isConnected()) {  // Thay đổi từ auth.isConnected thành auth.isConnected()
                 alert('Please connect your wallet first');
                 return;
             }
-            
+
             const username = usernameInput.value.trim();
             const roomId = roomIdInput.value.trim();
 
@@ -349,38 +318,52 @@
             }
 
             try {
-                // Initialize calls
-                if (!await ensureInitialized(username)) {
+                // Show loading state
+                joinMeetingBtn.disabled = true;
+                joinMeetingBtn.textContent = 'Joining...';
+
+                const roomExists = await SmartContractConnector.checkRoomExists(roomId);
+                if (!roomExists) {
+                    alert('Room does not exist. Please check the Room ID.');
+                    joinMeetingBtn.disabled = false;
+                    joinMeetingBtn.textContent = 'Join Meeting';
                     return;
                 }
-                
-                // Store information in localStorage
+
                 localStorage.setItem('username', username);
                 localStorage.setItem('roomId', roomId);
-                localStorage.setItem('privateKey', privateKeyInput.value.trim());
 
-                // Redirect to device check page
-                window.location.href = './check.html';
+                console.log('Joining room via smart contract...');
+
+                window.location.href = './room.html';
             } catch (err) {
                 console.error('Error joining room:', err);
                 alert('Failed to join room: ' + err.message);
+                
+                // Reset button state
+                joinMeetingBtn.disabled = false;
+                joinMeetingBtn.textContent = 'Join Meeting';
             }
         }
 
-        // Event Listeners
         connectWalletBtn.addEventListener('click', connectWallet);
         joinMeetingBtn.addEventListener('click', joinMeeting);
 
-        // Handle enter key
-        document.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter' && !joinMeetingBtn.disabled) {
-                joinMeeting();
+        document.addEventListener('DOMContentLoaded', () => {
+            const savedPrivateKey = localStorage.getItem('privateKey');
+            if (savedPrivateKey) {
+                privateKeyInput.value = savedPrivateKey;
+                connectWallet();
+            } else {
+                updateWalletUI(false);
             }
         });
-        
-        // Initialize UI
-        document.addEventListener('DOMContentLoaded', () => {
-            updateWalletUI(false);
+
+        auth.addAccountsChangedListener((address) => {
+            if (!address) {
+                updateWalletUI(false);
+                localStorage.removeItem('privateKey');
+            }
         });
     </script>
 </body>

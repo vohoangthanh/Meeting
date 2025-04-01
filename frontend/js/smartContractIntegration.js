@@ -6,11 +6,12 @@
 
 import { CONTRACT_ABI } from './abi.js';
 import { auth } from './auth.js';
+import eventListener from './contractEventListener.js';
 
 class SmartContractConnector {
     constructor() {
         // Contract configuration
-        this.contractAddress = "0xf8e21a267aF1450FBC5E90e098Ff0a8DBd9AD6DC";
+        this.contractAddress = "0x7255F5d5DedAe6f7fABeCA17aB176d083b362A9c";
         this.contractABI = CONTRACT_ABI;
 
         // State variables
@@ -340,95 +341,13 @@ class SmartContractConnector {
      */
     async listenForTrackPublishedAnswer(roomId, callback) {
         await this.ensureInitialized();
-
-        try {
-            // Listen for EventForwardedToFrontend events
-            // Filter only by participant address, which is indexed - not by roomId
-            const filter = this.contract.filters.EventForwardedToFrontend(
-                null, // Don't filter by roomId since it's not indexed
-                null
-            );
-
-            const listener = (eventRoomId, participant, eventData) => {
-                // Only process if this event is for our address and room
-                if (participant.toLowerCase() !== auth.userAddress.toLowerCase()) {
-                    return;
-                }
-
-                // Check roomId manually in the listener since we can't filter on it
-                if (roomId && eventRoomId !== roomId) {
-                    return;
-                }
-
-                try {
-                    // Parse the event data
-                    const decodedData = JSON.parse(ethers.utils.toUtf8String(eventData));
-
-                    // Check if this is a publish-track-response event
-                    if (decodedData.type === "publish-track-response") {
-                        callback(decodedData.cloudflareResponse);
-                    }
-                } catch (error) {
-                    console.error("Error processing track published answer:", error);
-                }
-            };
-
-            this.contract.on(filter, listener);
-
-            // Return function to remove the listener
-            return () => {
-                this.contract.off(filter, listener);
-                return true; // Listener was active and has been removed
-            };
-        } catch (error) {
-            console.error("Error setting up track published answer listener:", error);
-            return () => false; // Listener was never active
-        }
-    }
-
-    /**
-     * Pull tracks from a remote session
-     * @param {string} roomId - Room ID
-     * @param {string} sessionId - Local session ID
-     * @param {string} remoteSessionId - Remote session ID to pull from
-     * @param {string} trackName - Track name to pull
-     */
-    async pullTracksCompressed(roomId, sessionId, remoteSessionId, trackName) {
-        await this.ensureInitialized();
-
-        try {
-            // Create the pull track request
-            const pullData = {
-                type: "pull-track",
-                sessionId,
-                tracks: [{
-                    remoteSessionId,
-                    trackName
-                }],
-                timestamp: Date.now()
-            };
-
-            // Compress data to save gas
-            const compressedData = this.compressData(pullData);
-
-            // Create the event data
-            const eventData = ethers.utils.toUtf8Bytes(JSON.stringify({
-                type: "pull-track",
-                sessionId,
-                compressedData,
-                timestamp: Date.now()
-            }));
-
-            // Send to the smart contract
-            const tx = await this.contract.forwardEventToBackend(roomId, eventData);
-            await tx.wait();
-
-            console.log(`Requested track pull: ${trackName} from ${remoteSessionId}`);
-            return { success: true };
-        } catch (error) {
-            console.error("Failed to pull tracks:", error);
-            throw error;
-        }
+        
+        // Sử dụng module lắng nghe sự kiện độc lập
+        return eventListener.listenForTrackPublishedAnswer(
+            roomId, 
+            auth.userAddress, 
+            callback
+        );
     }
 
     /**
@@ -439,9 +358,10 @@ class SmartContractConnector {
      * @returns {Function} - Cleanup function
      */
     listenForTrackPullAnswer(roomId, sessionId, callback) {
-        return this._listenForEventType(
+        // Use the independent event listener module with the correct method
+        return eventListener.listenForTrackPullAnswer(
             roomId,
-            "pull-track-response",
+            auth.userAddress,
             callback
         );
     }
@@ -552,9 +472,10 @@ class SmartContractConnector {
      * @returns {Function} - Cleanup function
      */
     listenForTrackPullComplete(roomId, sessionId, callback) {
-        return this._listenForEventType(
-            roomId,
-            "track-pull-complete",
+        // Sử dụng module lắng nghe sự kiện độc lập
+        return eventListener.listenForTrackPullComplete(
+            roomId, 
+            auth.userAddress, 
             callback
         );
     }
@@ -566,78 +487,28 @@ class SmartContractConnector {
      * @returns {Function} - Cleanup function
      */
     listenForParticipantLeaveRoom(roomId, callback) {
-        return this._listenForEventType(
-            roomId,
-            "participant-left",
+        // Sử dụng module lắng nghe sự kiện độc lập
+        return eventListener.listenForParticipantLeaveRoom(
+            roomId, 
             callback
         );
     }
 
     /**
-     * Helper method to listen for specific event types
-     * @param {string} roomId - Room ID to filter on (optional)
-     * @param {string} eventType - Event type to filter
-     * @param {Function} callback - Callback function
+     * Listen for events forwarded from backend to frontend
+     * @param {string} roomId - Room ID 
+     * @param {Function} callback - Callback function for processing events
      * @returns {Function} - Cleanup function
      */
-    async _listenForEventType(roomId, eventType, callback) {
+    async listenForEventsToFrontend(roomId, callback) {
         await this.ensureInitialized();
-
-        const listenerKey = `${roomId || 'global'}-${eventType}-${Date.now()}`;
-
-        try {
-            // Don't filter by any parameters since they're not indexed in the contract
-            const filter = this.contract.filters.EventForwardedToFrontend(
-                null, // Don't filter by roomId (not indexed)
-                null  // Don't filter by participant (also not indexed)
-            );
-
-            const listener = (eventRoomId, participant, eventData) => {
-                try {
-                    // Check participant address manually in the listener
-                    if (participant.toLowerCase() !== auth.userAddress.toLowerCase()) {
-                        return;
-                    }
-
-                    // Check roomId manually if provided
-                    if (roomId && eventRoomId !== roomId) {
-                        return;
-                    }
-
-                    // Parse the event data
-                    const decodedData = JSON.parse(ethers.utils.toUtf8String(eventData));
-
-                    // Check if this matches our event type
-                    if (decodedData.type === eventType) {
-                        callback(decodedData);
-                    }
-                } catch (error) {
-                    console.error(`Error processing ${eventType} event:`, error);
-                }
-            };
-
-            // Store the listener and add it to the contract
-            this.eventListeners.set(listenerKey, listener);
-            this.contract.on(filter, listener);
-
-            // Create cleanup function
-            const cleanup = () => {
-                if (this.eventListeners.has(listenerKey)) {
-                    this.contract.off(filter, this.eventListeners.get(listenerKey));
-                    this.eventListeners.delete(listenerKey);
-                    return true; // Listener was active and has been removed
-                }
-                return false; // Listener was not active
-            };
-
-            // Store cleanup function
-            this.cleanupFunctions.set(listenerKey, cleanup);
-
-            return cleanup;
-        } catch (error) {
-            console.error(`Error setting up ${eventType} listener:`, error);
-            return () => false; // Listener was never active
-        }
+        
+        // Sử dụng module lắng nghe sự kiện độc lập
+        return eventListener.listenForEventsToFrontend(
+            roomId, 
+            auth.userAddress, 
+            callback
+        );
     }
 
     /**
@@ -680,6 +551,54 @@ class SmartContractConnector {
                 publishedTracks: []
             };
             return [currentUser];
+        }
+    }
+
+    /**
+     * Pull tracks from another participant
+     * @param {string} roomId - Room ID
+     * @param {string} sessionId - Current user's session ID
+     * @param {string} remoteSessionId - Remote participant's session ID
+     * @param {string} trackName - Track name to pull
+     */
+    async pullTracksCompressed(roomId, sessionId, remoteSessionId, trackName) {
+        await this.ensureInitialized();
+
+        try {
+            // Compress track request data
+            const pullData = {
+                sessionId: sessionId,
+                tracks: [{
+                    trackName: trackName,
+                    location: "remote",
+                    sessionId: remoteSessionId // Make sure to include remote session ID
+                }]
+            };
+            const compressedData = this.compressData(pullData);
+
+            // Create event data
+            const eventData = ethers.utils.toUtf8Bytes(JSON.stringify({
+                type: "pull-track",
+                sessionId,
+                remoteSessionId,
+                compressedData,
+                timestamp: Date.now()
+            }));
+
+            // Estimate gas for the transaction
+            const gasLimit = await this.contract.estimateGas.forwardEventToBackend(roomId, eventData);
+
+            // Send to smart contract with buffer on gas limit
+            const tx = await this.contract.forwardEventToBackend(roomId, eventData, {
+                gasLimit: gasLimit.add(100000)
+            });
+            await tx.wait();
+
+            console.log("Track pull request sent to smart contract");
+            return { success: true };
+        } catch (error) {
+            console.error("Failed to pull tracks:", error);
+            throw error;
         }
     }
 }

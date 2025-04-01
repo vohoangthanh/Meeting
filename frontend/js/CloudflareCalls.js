@@ -89,6 +89,7 @@ class CloudflareCalls {
         this._onTrackStatusChangedCallback = null;
         this._onDataMessageCallback = null;
         this._onConnectionStatsCallback = null;
+        this._onBackendEventCallback = null;
 
         // Generic message handlers
         this._wsMessageHandlers = new Set();
@@ -268,6 +269,67 @@ class CloudflareCalls {
     onWebSocketMessage(callback) {
         this._wsMessageHandlers.add(callback);
         return () => this._wsMessageHandlers.delete(callback);
+    }
+
+    /**
+     * Register a callback for events coming from the backend via smart contract
+     * @param {Function} callback - The callback function to handle backend events
+     */
+    onBackendEvent(callback) {
+        this._onBackendEventCallback = callback;
+    }
+
+    /**
+     * Start listening for SDP answers from the backend via smart contract
+     * This is crucial for establishing WebRTC connections successfully
+     */
+    listenForBackendEvents() {
+        if (!this.roomId) {
+            this._warn('Cannot listen for backend events before joining a room');
+            return;
+        }
+
+        if (!SmartContractConnector.isInitialized) {
+            this._warn('SmartContractConnector not initialized');
+            return;
+        }
+
+        console.log('Starting to listen for events forwarded from backend to frontend');
+        
+        // Lắng nghe các sự kiện từ backend thông qua phương thức mới
+        SmartContractConnector.listenForEventsToFrontend(
+            this.roomId,
+            async (eventData) => {
+                try {
+                    console.log('Received event from backend via smart contract:', eventData);
+                    
+                    // Nếu đây là SDP answer cho offer của chúng ta, xử lý
+                    if (eventData && eventData.type === 'answer' && eventData.sdp) {
+                        if (this.peerConnection && this.peerConnection.signalingState === 'have-local-offer') {
+                            const sessionDescription = new RTCSessionDescription({
+                                type: 'answer',
+                                sdp: eventData.sdp
+                            });
+                            
+                            await this.peerConnection.setRemoteDescription(sessionDescription);
+                            console.log('Applied SDP answer received via smart contract event');
+                        } else if (this.peerConnection) {
+                            console.warn(`Invalid signaling state for setRemoteDescription: ${this.peerConnection.signalingState}`);
+                        }
+                    }
+                    
+                    // Nếu có callback đăng ký, chuyển sự kiện đến nó
+                    if (this._onBackendEventCallback) {
+                        // Thực thi callback trong Promise để không block luồng chính
+                        Promise.resolve().then(() => {
+                            this._onBackendEventCallback(eventData);
+                        });
+                    }
+                } catch (error) {
+                    this._error('Error processing backend event:', error);
+                }
+            }
+        );
     }
 
     /************************************************
@@ -758,6 +820,7 @@ class CloudflareCalls {
 
                         if (pullAnswerData.errorCode) {
                             const error = new Error(pullAnswerData.errorDescription || 'Pull track failed');
+                            this._error('Pull track error:', error);
                             reject(error);
                             return;
                         }
@@ -788,8 +851,36 @@ class CloudflareCalls {
                                 await this.peerConnection.setRemoteDescription(pullAnswerData.sessionDescription);
                                 const localAnswer = await this.peerConnection.createAnswer();
                                 if (this.peerConnection.signalingState === 'have-remote-offer') {
-                                    console.log('Setting local description for renegotiation: 1 ', this.peerConnection.signalingState);
+                                    console.log('Setting local description for renegotiation: ', this.peerConnection.signalingState);
                                     await this.peerConnection.setLocalDescription(localAnswer);
+
+                                    // Send the renegotiation request to backend via smart contract
+                                    await SmartContractConnector.callToRenegotiate(
+                                        this.sessionId,
+                                        localAnswer.sdp,
+                                        localAnswer.type
+                                    );
+
+                                    // Set up listener for renegotiation answer
+                                    const removeRenegotiationListener = SmartContractConnector.ListenToAnswerRenegotiate(
+                                        this.sessionId,
+                                        async (renegotiationAnswer) => {
+                                            try {
+                                                console.log('Received renegotiation answer:', renegotiationAnswer);
+                                                if (renegotiationAnswer.sessionDescription) {
+                                                    await this.peerConnection.setRemoteDescription(renegotiationAnswer.sessionDescription);
+                                                    console.log('Successfully completed renegotiation');
+                                                }
+                                            } catch (error) {
+                                                this._error('Error handling renegotiation answer:', error);
+                                            } finally {
+                                                if (typeof removeRenegotiationListener === 'function') {
+                                                    removeRenegotiationListener();
+                                                }
+                                            }
+                                        }
+                                    );
+
                                 } else {
                                     console.log(
                                         'Skipping setLocalDescription due to state:',
@@ -807,12 +898,7 @@ class CloudflareCalls {
                                         });
                                     }
                                 });
-                                // Send the renegotiation request to the smart contract
-                                await SmartContractConnector.callToRenegotiate(
-                                    this.sessionId,
-                                    localAnswer.sdp,
-                                    localAnswer.type
-                                );
+
                             } finally {
                                 this.isRenegotiating = false;
                             }
@@ -830,7 +916,6 @@ class CloudflareCalls {
                         this._error('Error processing pull track answer:', error);
                         reject(error);
                     } finally {
-
                         // Process next item in queue
                         this._processPullTrackQueue();
                     }
@@ -849,47 +934,9 @@ class CloudflareCalls {
                 // Note: We don't resolve here - we wait for the event listener to resolve
             } catch (error) {
                 this._error('Error pulling tracks via smart contract:', error);
-
-
-                // // Fall back to direct API call if smart contract fails
-                // try {
-                //     console.log('Falling back to direct API call');
-                //     const pullUrl = `${this.backendUrl}/api/rooms/${this.roomId}/sessions/${this.sessionId}/pull`;
-                //     const body = { remoteSessionId, trackName };
-
-                //     // Original API call as fallback
-                //     const resp = await this._fetch(pullUrl, {
-                //         method: 'POST',
-                //         headers: { 'Content-Type': 'application/json' },
-                //         body: JSON.stringify(body)
-                //     }).then(r => r.json());
-
-                //     // Handle original API response
-                //     if (resp.errorCode) {
-                //         throw new Error(`API error: ${resp.errorDescription}`);
-                //     }
-
-                //     // Original response handling...
-                //     resolve();
-                // } catch (fallbackError) {
-                //     this._error('Fallback API call also failed:', fallbackError);
-                //     reject(fallbackError);
-                // } finally {
-                //     // Process next item in queue
-                //     this._processPullTrackQueue();
-                // }
+                reject(error);
+                this._processPullTrackQueue();
             }
-
-            // Add a safety timeout for each pull request in case event never arrives
-            setTimeout(() => {
-                // If listener is still active, we assume the request failed
-                const listenerActive = removeListener();
-                if (listenerActive) {
-                    this._warn(`Pull track timeout for '${trackName}' from session ${remoteSessionId}`);
-                    reject(new Error("Timeout waiting for track pull answer"));
-                    this._processPullTrackQueue();
-                }
-            }, 30000); // 30 second timeout
         } catch (error) {
             this._error('Unhandled error in pull track queue processing:', error);
             reject(error);
@@ -2132,7 +2179,7 @@ class CloudflareCalls {
                 width: { ideal: 640 },
                 height: { ideal: 480 },
                 frameRate: { ideal: 15 },
-                maxBitrate: 400_000
+                maxBitrate:400_000
             },
             audio: { maxBitrate: 32000, sampleRate: 44100, channelCount: 1 }
         },
@@ -2152,7 +2199,7 @@ class CloudflareCalls {
                 frameRate: { ideal: 10 },
                 maxBitrate: 150_000
             },
-            audio: { maxBitrate: 24000, sampleRate: 22050, channelCount: 1 }
+            audio: { maxBitrate: 32000,sampleRate: 44100, channelCount: 1 }
         },
         low_4x3_xs: {
             video: {

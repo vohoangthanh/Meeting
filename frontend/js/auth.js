@@ -4,7 +4,7 @@
 
 class Web3Auth {
     constructor() {
-        this.isConnected = false;
+        this._isConnected = false;
         this.userAddress = null;
         this.privateKey = null;
         this.web3 = null;
@@ -45,7 +45,7 @@ class Web3Auth {
                 this.web3 = new ethers.providers.JsonRpcProvider('https://bsc-testnet-rpc.publicnode.com');
             }
 
-            this.isConnected = true;
+            this._isConnected = true;
             
             // Persist connection state
             this._persistConnection();
@@ -56,7 +56,7 @@ class Web3Auth {
             return { success: true, address: this.userAddress };
         } catch (error) {
             console.error('Error connecting wallet:', error);
-            this.isConnected = false;
+            this._isConnected = false;
             this.userAddress = null;
             this.privateKey = null;
             return { success: false, error: error.message };
@@ -67,7 +67,7 @@ class Web3Auth {
      * Disconnect the wallet
      */
     disconnect() {
-        this.isConnected = false;
+        this._isConnected = false;
         this.userAddress = null;
         this.privateKey = null;
         // Clear persisted state
@@ -82,7 +82,7 @@ class Web3Auth {
      * @returns {boolean} Whether wallet is connected
      */
     isConnected() {
-        return this.isConnected;
+        return this._isConnected;
     }
 
     /**
@@ -170,7 +170,7 @@ class Web3Auth {
      * @private
      */
     _persistConnection() {
-        if (this.isConnected && this.userAddress) {
+        if (this._isConnected && this.userAddress) {
             localStorage.setItem('wallet_connected', 'true');
             localStorage.setItem('wallet_address', this.userAddress);
             // We don't store the private key in localStorage for security

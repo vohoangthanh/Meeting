@@ -48,7 +48,7 @@ contract DAppMeeting {
     // Events
     event ParticipantJoined(string roomId, address participant, Track[] initialTracks, bytes sessionDescription);
     event ParticipantLeft(string roomId, address participant);
-    event TrackAdded(string roomId, address participant, string trackName);
+    event TrackAdded(string roomId, address participant, string trackName, string sessionId);
     event EventForwardedToBackend(string roomId, address sender, bytes eventData);
     event EventForwardedToFrontend(string roomId, address participant, bytes eventData);
     
@@ -131,7 +131,7 @@ contract DAppMeeting {
             Track memory track = _initialTracks[i];
             participantTracks[_roomId][msg.sender].push(track);
             participantTrackCount[_roomId][msg.sender]++;
-            emit TrackAdded(_roomId, msg.sender, track.trackName);
+            emit TrackAdded(_roomId, msg.sender, track.trackName, track.sessionId);
         }
         
         // Emit the event for backend
@@ -173,7 +173,7 @@ contract DAppMeeting {
     function addTrack(string memory _roomId, Track memory _newTrack) public roomExists(_roomId) participantExists(_roomId) {
         participantTracks[_roomId][msg.sender].push(_newTrack);
         participantTrackCount[_roomId][msg.sender]++;
-        emit TrackAdded(_roomId, msg.sender, _newTrack.trackName);
+        emit TrackAdded(_roomId, msg.sender, _newTrack.trackName, _newTrack.sessionId);
     }
     
     function getParticipantInfo(string memory _roomId) public view roomExists(_roomId) participantExists(_roomId) returns (Participant memory) {
@@ -240,6 +240,6 @@ contract DAppMeeting {
         });
         participantTracks[_roomId][_participant].push(newTrack);
         participantTrackCount[_roomId][_participant]++;
-        emit TrackAdded(_roomId, _participant, _trackName);
+        emit TrackAdded(_roomId, _participant, _trackName, _sessionId);
     }
 }
