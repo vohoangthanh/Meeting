@@ -1,6 +1,8 @@
 package handle
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -119,15 +121,13 @@ func (h *EventHandler) HandleEventToBackend(event *contract.ContractEventForward
 	if eventType, ok := eventData["type"].(string); ok {
 		switch eventType {
 		case "publish-track":
-			// Handle publish track event
-			log.Printf("Handling publish-track event for room %s and %s", event.RoomId, event.Sender.Hex())
 			h.handlePublishTrack(event.RoomId, event.Sender, eventData)
-			// print eventData
-			// log.Printf("Event Data: %v", eventData)
 		case "pull-track":
 			h.handlePullTrack(event.RoomId, event.Sender, eventData)
 		case "close-track":
 			h.handleCloseTrack(event.RoomId, event.Sender, eventData)
+		case "renegotiation":
+			h.handleRenegotiation(event.RoomId, event.Sender, eventData)
 		default:
 			log.Printf("Unknown event type: %s", eventType)
 		}
@@ -315,134 +315,126 @@ func (h *EventHandler) handlePublishTrack(roomID string, sender common.Address, 
 
 // handlePullTrack processes pull track events from smart contract
 func (h *EventHandler) handlePullTrack(roomID string, sender common.Address, eventData map[string]interface{}) {
-	log.Printf("Handling pull track event for room %s from participant %s", roomID, sender.Hex())
+	log.Printf("[Smart Contract Event] Received track pull event for room %s from %s",
+		roomID, sender.Hex())
 
-	// Extract session IDs and track data
-	var sessionID string
-	var remoteSessionId string
-	var tracks []map[string]interface{}
-
-	// Check for compressed data format first
+	// Extract session ID, remote session ID and track name from eventData
+	var sessionID, remoteSessionID, trackName string
 	if compressedData, ok := eventData["compressedData"].(string); ok && compressedData != "" {
-		// Decompress the data
+		// Decompress data
 		decompressed, err := h.cloudflareService.decompressData([]byte(compressedData))
 		if err != nil {
-			log.Printf("Error decompressing pull track data: %v", err)
+			log.Printf("[Error] Failed to decompress pull track data: %v", err)
 			return
 		}
 
 		// Parse decompressed data
 		var pullData struct {
-			SessionId string                   `json:"sessionId"`
-			Tracks    []map[string]interface{} `json:"tracks"`
+			SessionId       string `json:"sessionId"`
+			RemoteSessionId string `json:"remoteSessionId"`
+			TrackName       string `json:"trackName"`
 		}
-
 		if err := json.Unmarshal([]byte(decompressed), &pullData); err != nil {
-			log.Printf("Error parsing decompressed pull track data: %v", err)
+			log.Printf("[Error] Failed to parse pull data: %v", err)
 			return
 		}
 
 		sessionID = pullData.SessionId
-		tracks = pullData.Tracks
+		remoteSessionID = pullData.RemoteSessionId
+		trackName = pullData.TrackName
 	} else {
-		// Extract directly from eventData
-		if sid, ok := eventData["sessionId"].(string); ok {
+		// Extract data directly from eventData
+		if sid, ok := eventData["sessionId"].(string); !ok {
+			log.Printf("[Error] Missing sessionId in pull track event")
+			return
+		} else {
 			sessionID = sid
-		} else {
-			log.Printf("Missing sessionId in pull-track event")
-			return
 		}
-
-		// Get remote session ID
-		if rsid, ok := eventData["remoteSessionId"].(string); ok {
-			remoteSessionId = rsid
-		} else {
-			log.Printf("Missing remoteSessionId in pull-track event")
+		if rsid, ok := eventData["remoteSessionId"].(string); !ok {
+			log.Printf("[Error] Missing remoteSessionId in pull track event")
 			return
+		} else {
+			remoteSessionID = rsid
 		}
-
-		// Get track name and construct track data
-		if trackName, ok := eventData["trackName"].(string); ok {
-			tracks = []map[string]interface{}{
-				{
-					"trackName": trackName,
-					"location":  "remote",
-					"sessionId": remoteSessionId,
-				},
-			}
-		} else {
-			log.Printf("Missing trackName in pull-track event")
+		if tn, ok := eventData["trackName"].(string); !ok {
+			log.Printf("[Error] Missing trackName in pull track event")
 			return
+		} else {
+			trackName = tn
 		}
 	}
 
-	// Ensure all tracks have the required fields
-	for _, track := range tracks {
-		track["location"] = "remote"
-		if _, ok := track["sessionId"]; !ok {
-			track["sessionId"] = remoteSessionId
-		}
+	log.Printf("[Pull Request] Session %s requesting to pull track %s from session %s",
+		sessionID, trackName, remoteSessionID)
+
+	// Prepare pull request for Cloudflare
+	tracks := []map[string]interface{}{
+		{
+			"trackName": trackName,
+			"location":  "remote",
+			"sessionId": remoteSessionID,
+		},
 	}
 
-	// Call Cloudflare to pull tracks
+	// Call Cloudflare service to pull tracks
 	response, err := h.cloudflareService.PullTracks(sessionID, tracks)
 	if err != nil {
-		log.Printf("Error pulling tracks: %v", err)
-
-		// Create error response
+		log.Printf("[Error] Failed to pull tracks: %v", err)
 		errorResponse := map[string]interface{}{
 			"type":             "pull-track-response",
 			"errorCode":        500,
-			"errorDescription": fmt.Sprintf("Failed to pull tracks: %v", err),
+			"errorDescription": fmt.Sprintf("Failed to pull track: %v", err),
 		}
 
-		responseBytes, err := json.Marshal(errorResponse)
-		if err != nil {
-			log.Printf("Error marshaling error response: %v", err)
-			return
-		}
+		responseBytes, _ := json.Marshal(errorResponse)
+		// Compress error response
+		var compressed bytes.Buffer
+		w := zlib.NewWriter(&compressed)
+		w.Write(responseBytes)
+		w.Close()
 
-		// Forward error response to the frontend
-		_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
+		// Send error response back to frontend
+		_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, compressed.Bytes())
 		if err != nil {
-			log.Printf("Error forwarding error response to frontend: %v", err)
+			log.Printf("[Error] Failed to send error response: %v", err)
 		}
 		return
 	}
 
-	// Check if renegotiation is needed based on Cloudflare response
-	if sdp, ok := response["sessionDescription"].(map[string]interface{}); ok {
-		responseData := map[string]interface{}{
-			"type":                           "pull-track-response",
-			"cloudflareResponse":             response,
-			"requiresImmediateRenegotiation": true,
-			"sessionDescription":             sdp,
-		}
-		responseBytes, err := json.Marshal(responseData)
-		if err != nil {
-			log.Printf("Error marshaling response with renegotiation: %v", err)
-			return
-		}
-		_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
-		if err != nil {
-			log.Printf("Error forwarding renegotiation response: %v", err)
-		}
-	} else {
-		// Send normal success response if no renegotiation needed
-		responseData := map[string]interface{}{
-			"type":               "pull-track-response",
-			"cloudflareResponse": response,
-		}
-		responseBytes, err := json.Marshal(responseData)
-		if err != nil {
-			log.Printf("Error marshaling response: %v", err)
-			return
-		}
-		_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
-		if err != nil {
-			log.Printf("Error forwarding response: %v", err)
-		}
+	// Check if response contains session description for renegotiation
+	responseData := map[string]interface{}{
+		"type":                           "pull-track-response",
+		"sessionId":                      sessionID,
+		"requiresImmediateRenegotiation": false,
 	}
+
+	if sdp, ok := response["sessionDescription"].(map[string]interface{}); ok {
+		responseData["requiresImmediateRenegotiation"] = true
+		responseData["sessionDescription"] = sdp
+	}
+
+	// Send success response back to frontend
+	responseBytes, err := json.Marshal(responseData)
+	if err != nil {
+		log.Printf("[Error] Failed to marshal response: %v", err)
+		return
+	}
+
+	// Compress response
+	var compressed bytes.Buffer
+	w := zlib.NewWriter(&compressed)
+	w.Write(responseBytes)
+	w.Close()
+
+	// Send response to frontend
+	_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, compressed.Bytes())
+	if err != nil {
+		log.Printf("[Error] Failed to send success response: %v", err)
+		return
+	}
+
+	log.Printf("[Success] Successfully pulled track %s from session %s for session %s",
+		trackName, remoteSessionID, sessionID)
 }
 
 // handleCloseTrack processes close track events from smart contract
@@ -504,6 +496,98 @@ func (h *EventHandler) handleCloseTrack(roomID string, sender common.Address, ev
 	}
 
 	// Forward the response to the frontend via our queue
+	_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
+	if err != nil {
+		log.Printf("Error forwarding response to frontend: %v", err)
+	}
+}
+
+// handleRenegotiation processes renegotiation requests
+func (h *EventHandler) handleRenegotiation(roomID string, sender common.Address, eventData map[string]interface{}) {
+	log.Printf("Handling renegotiation for room %s from participant %s", roomID, sender.Hex())
+
+	var sessionID string
+	var sessionDescription map[string]interface{}
+
+	// Check for compressed data format first
+	if compressedData, ok := eventData["compressedData"].(string); ok && compressedData != "" {
+		// Decompress the data
+		decompressed, err := h.cloudflareService.decompressData([]byte(compressedData))
+		if err != nil {
+			log.Printf("Error decompressing renegotiation data: %v", err)
+			return
+		}
+
+		// Parse decompressed data
+		var renegotiationData struct {
+			SessionId          string                 `json:"sessionId"`
+			SessionDescription map[string]interface{} `json:"sessionDescription"`
+		}
+
+		if err := json.Unmarshal([]byte(decompressed), &renegotiationData); err != nil {
+			log.Printf("Error parsing decompressed renegotiation data: %v", err)
+			return
+		}
+
+		sessionID = renegotiationData.SessionId
+		sessionDescription = renegotiationData.SessionDescription
+	} else {
+		// Extract data directly if not compressed
+		if sid, ok := eventData["sessionId"].(string); ok {
+			sessionID = sid
+		} else {
+			log.Printf("Missing sessionId in renegotiation event")
+			return
+		}
+
+		if sd, ok := eventData["sessionDescription"].(map[string]interface{}); ok {
+			sessionDescription = sd
+		} else {
+			log.Printf("Missing or invalid sessionDescription in renegotiation event")
+			return
+		}
+	}
+
+	// Call Cloudflare to renegotiate
+	response, err := h.cloudflareService.Renegotiate(sessionID, sessionDescription)
+	if err != nil {
+		log.Printf("Error during renegotiation: %v", err)
+
+		// Create error response
+		errorResponse := map[string]interface{}{
+			"type":             "renegotiation-response",
+			"errorCode":        500,
+			"errorDescription": fmt.Sprintf("Failed to renegotiate: %v", err),
+		}
+
+		responseBytes, err := json.Marshal(errorResponse)
+		if err != nil {
+			log.Printf("Error marshaling error response: %v", err)
+			return
+		}
+
+		// Forward error response to the frontend
+		_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
+		if err != nil {
+			log.Printf("Error forwarding error response to frontend: %v", err)
+		}
+		return
+	}
+
+	// Send success response back to frontend
+	responseData := map[string]interface{}{
+		"type":               "renegotiation-response",
+		"sessionId":          sessionID,
+		"sessionDescription": response["sessionDescription"],
+	}
+
+	responseBytes, err := json.Marshal(responseData)
+	if err != nil {
+		log.Printf("Error marshaling response: %v", err)
+		return
+	}
+
+	// Forward the response to the frontend
 	_, err = h.smCallManager.ForwardEventToFrontend(roomID, sender, responseBytes)
 	if err != nil {
 		log.Printf("Error forwarding response to frontend: %v", err)

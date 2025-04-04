@@ -159,7 +159,24 @@ func (cs *CloudflareService) PublishTracks(sessionID string, offer map[string]in
 
 // PullTracks pulls tracks from a remote session
 func (cs *CloudflareService) PullTracks(sessionID string, tracks []map[string]interface{}) (map[string]interface{}, error) {
-	// Validate tracks format
+	log.Printf("[Cloudflare API] Pulling tracks for session %s", sessionID)
+
+	// // First check session state
+	// state, err := cs.GetSessionState(sessionID)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("error getting session state: %v", err)
+	// }
+
+	// // Log session state
+	// log.Printf("[Cloudflare API] Session %s state: %+v", sessionID, state)
+
+	// // Check if session is connected
+	// if state == nil || state["connectionState"] != "connected" {
+	// 	return nil, fmt.Errorf("Session %s is not in connected state. Current state: %v",
+	// 		sessionID, state["connectionState"])
+	// }
+
+	// Validate tracks format and prepare request
 	for _, track := range tracks {
 		if _, ok := track["trackName"]; !ok {
 			return nil, fmt.Errorf("trackName must be present in track data")
@@ -172,12 +189,29 @@ func (cs *CloudflareService) PullTracks(sessionID string, tracks []map[string]in
 		}
 	}
 
-	url := fmt.Sprintf("/sessions/%s/tracks/new", sessionID)
+	url := fmt.Sprintf("%s/%s/sessions/%s/tracks/new", cs.baseURL, cs.appID, sessionID)
+	log.Printf("[Cloudflare API] Making request to: %s", url)
+
+	// Create request body
 	requestBody := map[string]interface{}{
 		"tracks": tracks,
 	}
 
-	return cs.makeCloudflareRequest("POST", url, requestBody)
+	// Log request body
+	requestBytes, _ := json.Marshal(requestBody)
+	log.Printf("[Cloudflare API] Request body: %s", string(requestBytes))
+
+	// Make API call
+	response, err := cs.makeCloudflareRequest("POST", fmt.Sprintf("/sessions/%s/tracks/new", sessionID), requestBody)
+	if err != nil {
+		log.Printf("[Cloudflare API Error] Failed to pull tracks: %v", err)
+		return nil, fmt.Errorf("failed to pull tracks: %v", err)
+	}
+
+	// Log successful response
+	log.Printf("[Cloudflare API Success] Pulled tracks successfully for session %s", sessionID)
+
+	return response, nil
 }
 
 // Renegotiate performs renegotiation for a session
