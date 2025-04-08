@@ -145,16 +145,24 @@ class ContractEventListener {
                     currentSessionId: this.currentSessionId
                 });
 
-                // Chỉ pull track nếu không phải là track của bản thân
-                if (sessionId !== this.currentSessionId) {
-                    console.log('Pulling track from other participant:', trackName);
-                    // Thông báo cho tất cả các callback đã đăng ký
-                    this.eventHandlers[eventName].forEach(callback => {
-                        callback(roomId, participant, trackName, sessionId, event);
-                    });
-                } else {
-                    console.log('Ignoring own track:', trackName);
+                // kiem tra address
+                var userAdress = localStorage.getItem("wallet_address");
+                if (userAdress && userAdress.toLowerCase() === participant.toLowerCase()) {
+                    this.hasSessionId = true;
+                    this.currentSessionId = sessionId;
+                    localStorage.setItem("sessionId", sessionId);
                 }
+
+                // // Chỉ pull track nếu không phải là track của bản thân
+                // if (sessionId !== this.currentSessionId) {
+                //     console.log('Pulling track from other participant:', trackName);
+                //     // Thông báo cho tất cả các callback đã đăng ký
+                //     this.eventHandlers[eventName].forEach(callback => {
+                //         callback(roomId, participant, trackName, sessionId, event);
+                //     });
+                // } else {
+                //     console.log('Ignoring own track:', trackName);
+                // }
             } else {
                 // Xử lý các sự kiện khác như cũ
                 this.eventHandlers[eventName].forEach(callback => {
@@ -214,27 +222,50 @@ class ContractEventListener {
      * @returns {Function} - Hàm để hủy đăng ký callback
      */
     listenForEventsToFrontend(roomId, address, callback) {
-        return this.on("EventForwardedToFrontend", (eventRoomId, participant, eventData, event) => {
-            // Lọc theo địa chỉ người dùng
+        return this.on("EventForwardedToFrontend", async (eventRoomId, participant, eventData, event) => {
+            // Filter by user address
             if (address && participant.toLowerCase() !== address.toLowerCase()) {
                 return;
             }
             
-            // Lọc theo roomId nếu được cung cấp
+            // Filter by roomId if provided
             if (roomId && eventRoomId !== roomId) {
                 return;
             }
             
             try {
-                // Giải mã dữ liệu sự kiện
-                const decodedData = JSON.parse(ethers.utils.toUtf8String(eventData));
-                callback(decodedData, event);
+                let data;
+                // If data is in hex format (from contract), convert to Uint8Array
+                if (typeof eventData === 'string' && eventData.startsWith('0x')) {
+                    eventData = eventData.slice(2); // Remove '0x'
+                    const byteArray = new Uint8Array(eventData.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+                    data = byteArray;
+                } else if (eventData instanceof Uint8Array) {
+                    data = eventData;
+                }
+
+                // Try to decompress the data
+                try {
+                    const decompressed = pako.inflate(data);
+                    const decoder = new TextDecoder('utf-8');
+                    const jsonString = decoder.decode(decompressed);
+                    const decodedData = JSON.parse(jsonString);
+                    console.log('Successfully decompressed event data:', decodedData);
+                    callback(decodedData, event);
+                } catch (decompressionError) {
+                    console.warn('Decompression failed, trying direct decoding:', decompressionError);
+                    // If decompression fails, try to decode as UTF-8 directly
+                    const decoder = new TextDecoder('utf-8');
+                    const jsonString = decoder.decode(data);
+                    const decodedData = JSON.parse(jsonString);
+                    callback(decodedData, event);
+                }
             } catch (error) {
                 console.error("Error processing EventForwardedToFrontend:", error);
             }
         });
     }
-    
+
     /**
      * Lắng nghe sự kiện kiểu TrackPublishedAnswer
      * @param {string} roomId - ID phòng
@@ -314,8 +345,98 @@ class ContractEventListener {
     listenForTrackPullAnswer(roomId, address, callback) {
         return this.listenForEventsToFrontend(roomId, address, (decodedData) => {
             if (decodedData.type === 'pull-track-response') {
-                callback(decodedData.cloudflareResponse);
+                try {
+                    console.log("Received pull track response:", decodedData.type);
+                    // The data should already be decompressed by listenForEventsToFrontend
+                    callback(decodedData.cloudflareResponse);
+                } catch (error) {
+                    console.error("Error processing track pull answer:", error);
+                }
             }
+        });
+    }
+
+    /**
+     * Helper method to decompress data
+     * @param {string|Uint8Array} compressedData - The compressed data to decompress
+     * @returns {string|null} - Decompressed data as string or null if failed
+     * @private
+     */
+    async _decompressData(compressedData) {
+        try {
+            // If data is in hex string format (starts with '0x'), convert to Uint8Array
+            if (typeof compressedData === "string" && compressedData.startsWith("0x")) {
+                compressedData = compressedData.slice(2); // Remove '0x'
+                const byteArray = new Uint8Array(compressedData.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+
+                // Decompress data using pako
+                const data = pako.inflate(byteArray);
+
+                // Convert byte array to UTF-8 string
+                const decoder = new TextDecoder("utf-8");
+                const strData = decoder.decode(data);
+
+                console.log("Decompressed Data:", strData);
+
+                return strData;
+            } else {
+                console.error("Invalid compressedData format:", compressedData);
+                return null;
+            }
+        } catch (error) {
+            console.error("Error in _decompressData:", error);
+            return null;
+        }
+    }
+
+    /**
+     * Listen for specific event type from backend
+     * @param {string} eventType - Type of event to listen for
+     * @param {string} roomId - Room ID
+     * @param {string} userAddress - User's wallet address 
+     * @param {Function} callback - Callback function for event
+     */
+    listenForEventType(eventType, roomId, userAddress, callback) {
+        return this.on("EventForwardedToFrontend", (eventRoomId, participant, eventData) => {
+            // Filter by roomId and address
+            if (roomId && eventRoomId !== roomId) return;
+            if (userAddress && participant.toLowerCase() !== userAddress.toLowerCase()) return;
+            
+            try {
+                // Parse and decompress data
+                let data;
+                if (typeof eventData === 'string' && eventData.startsWith('0x')) {
+                    const dataBytes = ethers.utils.arrayify(eventData);
+                    const decompressed = pako.inflate(dataBytes, {to: 'string'});
+                    data = JSON.parse(decompressed);
+                } else {
+                    data = JSON.parse(eventData);
+                }
+
+                // Log received event for debugging
+                console.log(`Received ${eventType} event:`, data);
+
+                // Only call callback if event type matches
+                if (data.type === eventType) {
+                    callback(data);
+                }
+            } catch (error) {
+                console.error(`Error processing ${eventType} event:`, error);
+            }
+        });
+    }
+
+    /**
+     * Listen for renegotiation response
+     * @param {string} roomId - Room ID
+     * @param {string} userAddress - User's wallet address
+     * @param {Function} callback - Callback function
+     */
+    listenForRenegotiationResponse(roomId, userAddress, callback) {
+        console.log('Setting up renegotiation response listener');
+        return this.listenForEventType('renegotiation-response', roomId, userAddress, (data) => {
+            console.log('Renegotiation response received:', data);
+            callback(data);
         });
     }
 }

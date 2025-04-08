@@ -57,6 +57,7 @@ const username = localStorage.getItem('username');
 const roomId = localStorage.getItem('roomId');
 const walletAddress = localStorage.getItem('privateKey');
 
+
 // Check wallet connection before proceeding
 async function checkWalletAuth() {
     // Check if wallet address exists in localStorage
@@ -279,10 +280,16 @@ async function joinRoom() {
 
     console.log('Peer Connection established:', calls.peerConnection.connectionState);
 
+    if(calls.sessionId === null || calls.sessionId === undefined || calls.sessionId === '') {
+        console.error('Session ID is null or undefined. Cannot proceed.');
+        return;
+
+    }
+    var userAddress = localStorage.getItem('wallet_address');
     // 5. Set up remote streams for existing participants
     for (const participant of participants) {
         // Skip if it's our own session
-        if (participant.sessionId === calls.sessionId) continue;
+        if (participant.walletAddress.toLowerCase() === userAddress.toLowerCase()) continue;
 
         console.log('Processing participant:', participant);
 
@@ -296,28 +303,6 @@ async function joinRoom() {
     // Set session ID cho contract event listener
     eventListener.setCurrentSessionId(calls.sessionId);
 
-    // Thiết lập các event listeners
-    const cleanupFunctions = [];
-    
-    // Lắng nghe sự kiện TrackAdded
-    cleanupFunctions.push(eventListener.listenForTrackAdded(
-        roomId,
-        async (participant, trackName, sessionId) => {
-            try {
-                console.log(`New track detected from ${participant}: ${trackName}`);
-                // Pull track về máy nếu không phải là track của chính mình
-                if (sessionId !== calls.sessionId) {
-                    await calls._pullTracks(sessionId, trackName);
-                } else {
-                    console.log('Ignoring own track:', trackName);
-                }
-            } catch (error) {
-                console.error('Error pulling track:', error);
-                showNotification(`Failed to pull track from ${participant}`, 'error');
-            }
-        }
-    ));
-    
     // 5. Start monitoring stats sau khi mọi thứ đã setup
     calls.startStatsMonitoring(1000);
 }

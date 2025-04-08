@@ -691,60 +691,52 @@ class CloudflareCalls {
      * @returns {Promise<void>}
      */
     async _renegotiate() {
-        console.log('[1]Renegotiating via smart contract...');
-        if (!this.peerConnection) return;
-        console.log('[2]Renegotiating via smart contract...');
-        if (this._renegotiateTimeout) {
-            clearTimeout(this._renegotiateTimeout);
+        if (!this.peerConnection) {
+            console.log('No peer connection available for renegotiation');
+            return;
         }
-
-        this._renegotiateTimeout = setTimeout(async () => {
-            try {
-                console.log('Starting renegotiation process via smart contract...');
-                const answer = await this.peerConnection.createAnswer();
-                console.log('Created renegotiation answer:', answer.sdp);
-                // Kiểm tra trạng thái trước khi gọi setLocalDescription
-                if (this.peerConnection.signalingState === 'have-remote-offer') {
-                    console.log('Setting local description for renegotiation: ', this.peerConnection.signalingState);
-                    await this.peerConnection.setLocalDescription(answer);
-                } else {
-                    console.log(
-                        'Skipping setLocalDescription due to state:',
-                        this.peerConnection.signalingState
-                    );
-                }
-                // Set up event listener for the renegotiation answer from smart contract
-                const removeListener1 = SmartContractConnector.ListenToAnswerRenegotiate(
+        
+        try {
+            console.log('Creating renegotiation answer...');
+            const answer = await this.peerConnection.createAnswer();
+            
+            if (this.peerConnection.signalingState === 'have-remote-offer') {
+                console.log('Setting local description for renegotiation');
+                await this.peerConnection.setLocalDescription(answer);
+                
+                // Set up listener for renegotiation response
+                const removeListener = SmartContractConnector.ListenToAnswerRenegotiate(
                     this.sessionId,
                     async (answerData) => {
                         try {
-                            console.log('Received renegotiation answer from smart contract:', answerData);
-
-                            await this.peerConnection.setRemoteDescription(answerData.sessionDescription);
-                            console.log('Renegotiation successful. Applied SFU response.');
+                            console.log('Received renegotiation response:', answerData);
+                            if (answerData.sessionDescription) {
+                                const remoteDesc = new RTCSessionDescription(answerData.sessionDescription);
+                                await this.peerConnection.setRemoteDescription(remoteDesc);
+                                console.log('Renegotiation completed successfully');
+                            }
                         } catch (error) {
-                            this._error('Error applying renegotiation answer:', error);
+                            console.error('Error handling renegotiation response:', error);
+                        } finally {
+                            if (removeListener) removeListener();
                         }
                     }
                 );
 
-                // Send the renegotiation request to the smart contract
+                // Send renegotiation request to smart contract
                 await SmartContractConnector.callToRenegotiate(
                     this.sessionId,
                     answer.sdp,
                     answer.type
                 );
-                console.log('Renegotiation request sent to smart contract');
 
-                // Add a timeout to clean up the listener if no response is received
-                // setTimeout(() => {
-                //     console.log('Cleaning up renegotiation listener after timeout');
-                //     removeListener();
-                // }, 30000); // 30 second timeout
-            } catch (error) {
-                this._error('Error during smart contract renegotiation:', error);
+                console.log('Renegotiation request sent to smart contract');
+            } else {
+                console.log('Peer connection not in correct state for renegotiation');
             }
-        }, 500);
+        } catch (error) {
+            console.error('Renegotiation error:', error); 
+        }
     }
 
     /**
@@ -778,7 +770,34 @@ class CloudflareCalls {
      * @returns {Promise<void>}
      */
     async _pullTracks(remoteSessionId, trackName) {
-        // Add track pull request to queue
+        if (!this.peerConnection) {
+            throw new Error('PeerConnection not established');
+        }
+
+        // Wait for peer connection to be fully established
+        if (this.peerConnection.connectionState !== 'connected') {
+            console.log('Waiting for peer connection to be established...');
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    reject(new Error('Timeout waiting for peer connection'));
+                }, 10000); // 10 second timeout
+
+                const checkState = () => {
+                    if (this.peerConnection.connectionState === 'connected') {
+                        clearTimeout(timeout);
+                        resolve();
+                    } else if (this.peerConnection.connectionState === 'failed') {
+                        clearTimeout(timeout);
+                        reject(new Error('Peer connection failed'));
+                    } else {
+                        setTimeout(checkState, 100);
+                    }
+                };
+                checkState();
+            });
+        }
+
+        // Add to pull track queue
         return new Promise((resolve, reject) => {
             console.log(`Queueing track pull: '${trackName}' from session ${remoteSessionId}`);
 
@@ -797,7 +816,7 @@ class CloudflareCalls {
         });
     }
 
-    // Add a new method to process the queue
+    // Inside _processPullTrackQueue method
     async _processPullTrackQueue() {
         if (this.pullTrackQueue.length === 0) {
             this.isProcessingPullTrack = false;
@@ -807,23 +826,28 @@ class CloudflareCalls {
         this.isProcessingPullTrack = true;
         const { remoteSessionId, trackName, resolve, reject } = this.pullTrackQueue.shift();
 
+        if (!this.peerConnection || this.peerConnection.connectionState !== 'connected') {
+            reject(new Error('PeerConnection not ready'));
+            this._processPullTrackQueue();
+            return;
+        }
+
         try {
             console.log(`Processing pull track from queue: '${trackName}' from session ${remoteSessionId}`);
 
             // Set up listener for pull answer from the smart contract
-            const removeListener = SmartContractConnector.listenForTrackPullAnswer(
+            const removeListener = SmartContractConnector.listenForEventsToFrontend(
                 this.roomId,
-                this.sessionId,
                 async (pullAnswerData) => {
                     try {
-                        console.log('Received pull answer from backend via smart contract event:', pullAnswerData);
+                        console.log('Received pull answer from backend:', pullAnswerData);
 
-                        if (pullAnswerData.errorCode) {
-                            const error = new Error(pullAnswerData.errorDescription || 'Pull track failed');
-                            this._error('Pull track error:', error);
-                            reject(error);
-                            return;
-                        }
+                        // if (pullAnswerData.errorCode) {
+                        //     const error = new Error(pullAnswerData.errorDescription || 'Pull track failed');
+                        //     this._error('Pull track error:', error);
+                        //     reject(error);
+                        //     return;
+                        // }
 
                         if (pullAnswerData.requiresImmediateRenegotiation) {
                             if (this.isRenegotiating) {
@@ -832,7 +856,6 @@ class CloudflareCalls {
                             }
 
                             this.isRenegotiating = true;
-                            console.log('Pull => requires renegotiation');
 
                             try {
                                 // Set up mappings from the SDP
@@ -849,17 +872,12 @@ class CloudflareCalls {
 
                                 // Now set the remote description and create answer
                                 await this.peerConnection.setRemoteDescription(pullAnswerData.sessionDescription);
-                                const localAnswer = await this.peerConnection.createAnswer();
-                                if (this.peerConnection.signalingState === 'have-remote-offer') {
-                                    console.log('Setting local description for renegotiation: ', this.peerConnection.signalingState);
-                                    await this.peerConnection.setLocalDescription(localAnswer);
 
-                                    // Send the renegotiation request to backend via smart contract
-                                    await SmartContractConnector.callToRenegotiate(
-                                        this.sessionId,
-                                        localAnswer.sdp,
-                                        localAnswer.type
-                                    );
+                                // Create and set local answer only if we're in the right state
+                                if (this.peerConnection.signalingState === 'have-remote-offer') {
+                                    const localAnswer = await this.peerConnection.createAnswer();
+                                    console.log('Setting local description for renegotiation');
+                                    await this.peerConnection.setLocalDescription(localAnswer);
 
                                     // Set up listener for renegotiation answer
                                     const removeRenegotiationListener = SmartContractConnector.ListenToAnswerRenegotiate(
@@ -881,15 +899,18 @@ class CloudflareCalls {
                                         }
                                     );
 
-                                } else {
-                                    console.log(
-                                        'Skipping setLocalDescription due to state:',
-                                        this.peerConnection.signalingState
+                                    // Send renegotiation request
+                                    await SmartContractConnector.callToRenegotiate(
+                                        this.sessionId,
+                                        localAnswer.sdp,
+                                        localAnswer.type
                                     );
+                                } else {
+                                    console.log(`Skipping local answer due to signaling state: ${this.peerConnection.signalingState}`);
                                 }
 
-                                const transceivers = this.peerConnection.getTransceivers();
-                                transceivers.forEach(transceiver => {
+                                // Verify mid mappings
+                                this.peerConnection.getTransceivers().forEach(transceiver => {
                                     if (transceiver.mid && pendingMids.has(transceiver.mid)) {
                                         this._log('Verified MID mapping:', {
                                             mid: transceiver.mid,
@@ -916,29 +937,24 @@ class CloudflareCalls {
                         this._error('Error processing pull track answer:', error);
                         reject(error);
                     } finally {
-                        // Process next item in queue
+                        if (typeof removeListener === 'function') {
+                            removeListener();
+                        }
                         this._processPullTrackQueue();
                     }
                 }
             );
 
-            try {
-                // Call smart contract to request pull
-                await SmartContractConnector.pullTracksCompressed(
-                    this.roomId,
-                    this.sessionId,
-                    remoteSessionId,
-                    trackName
-                );
+            // Send pull track request via smart contract
+            await SmartContractConnector.pullTracksCompressed(
+                this.roomId,
+                this.sessionId,
+                remoteSessionId,
+                trackName
+            );
 
-                // Note: We don't resolve here - we wait for the event listener to resolve
-            } catch (error) {
-                this._error('Error pulling tracks via smart contract:', error);
-                reject(error);
-                this._processPullTrackQueue();
-            }
         } catch (error) {
-            this._error('Unhandled error in pull track queue processing:', error);
+            this._error('Error in pull track processing:', error);
             reject(error);
             this._processPullTrackQueue();
         }

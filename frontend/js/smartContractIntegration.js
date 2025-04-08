@@ -341,11 +341,11 @@ class SmartContractConnector {
      */
     async listenForTrackPublishedAnswer(roomId, callback) {
         await this.ensureInitialized();
-        
+
         // Sử dụng module lắng nghe sự kiện độc lập
         return eventListener.listenForTrackPublishedAnswer(
-            roomId, 
-            auth.userAddress, 
+            roomId,
+            auth.userAddress,
             callback
         );
     }
@@ -373,10 +373,21 @@ class SmartContractConnector {
      * @returns {Function} - Cleanup function
      */
     ListenToAnswerRenegotiate(sessionId, callback) {
-        return this._listenForEventType(
-            null, // Room ID not needed for this filter
-            "renegotiation-response",
-            callback
+        // Get roomId from localStorage since it's needed for event filtering
+        const roomId = localStorage.getItem('roomId');
+        if (!roomId) {
+            console.error('No roomId found in localStorage');
+            return () => { };
+        }
+
+        return eventListener.listenForRenegotiationResponse(
+            roomId,
+            this.signer?.address,
+            (data) => {
+                if (data && data.sessionId === sessionId) {
+                    callback(data);
+                }
+            }
         );
     }
 
@@ -387,41 +398,44 @@ class SmartContractConnector {
      * @param {string} type - SDP type
      */
     async callToRenegotiate(sessionId, sdp, type) {
-        await this.ensureInitialized();
-
         try {
-            // Find the room ID from localStorage - we need this for the event
             const roomId = localStorage.getItem('roomId');
             if (!roomId) {
-                throw new Error("No roomId found in localStorage");
+                console.error("No room ID found in localStorage");
+                throw new Error("No room ID found");
             }
-
-            // Create renegotiation data
-            const renegotiationData = {
+    
+            // Compress the SDP data
+            const encoder = new TextEncoder();
+            const data = encoder.encode(JSON.stringify({
                 type: "renegotiation",
                 sessionId,
-                sessionDescription: {
-                    sdp,
-                    type
-                },
-                timestamp: Date.now()
-            };
-
-            // Compress data
-            const compressedData = this.compressData(renegotiationData);
-
-            // Create the event data
-            const eventData = ethers.utils.toUtf8Bytes(JSON.stringify({
-                type: "renegotiation",
-                sessionId,
-                compressedData,
+                sdp,
                 timestamp: Date.now()
             }));
-
-            // Send to the smart contract
-            const tx = await this.contract.forwardEventToBackend(roomId, eventData);
+            const compressedData = pako.deflate(data);
+            const eventData = ethers.utils.hexlify(compressedData);
+    
+            // Get user wallet
+            const wallet = new ethers.Wallet(localStorage.getItem('privateKey'));
+            const userAddress = wallet.address;
+            
+            // Get the latest nonce from the blockchain
+            const provider = new ethers.providers.Web3Provider(window.ethereum);
+            const latestNonce = await provider.getTransactionCount(userAddress, "latest");
+            console.log("Using latest nonce for renegotiation:", latestNonce);
+    
+            // Estimate gas with extra buffer
+            const gasLimit = await this.contract.estimateGas.forwardEventToBackend(roomId, eventData);
+            console.log("Estimated gas limit for renegotiation:", gasLimit.toString());
+            
+            // Send to smart contract with explicit nonce
+            const tx = await this.contract.forwardEventToBackend(roomId, eventData, {
+                gasLimit: gasLimit.add(100000), // Add buffer to estimated gas limit
+                nonce: latestNonce // Use explicit nonce from blockchain
+            });
+    
             await tx.wait();
-
             console.log("Renegotiation request sent");
             return { success: true };
         } catch (error) {
@@ -474,8 +488,8 @@ class SmartContractConnector {
     listenForTrackPullComplete(roomId, sessionId, callback) {
         // Sử dụng module lắng nghe sự kiện độc lập
         return eventListener.listenForTrackPullComplete(
-            roomId, 
-            auth.userAddress, 
+            roomId,
+            auth.userAddress,
             callback
         );
     }
@@ -489,7 +503,7 @@ class SmartContractConnector {
     listenForParticipantLeaveRoom(roomId, callback) {
         // Sử dụng module lắng nghe sự kiện độc lập
         return eventListener.listenForParticipantLeaveRoom(
-            roomId, 
+            roomId,
             callback
         );
     }
@@ -502,11 +516,11 @@ class SmartContractConnector {
      */
     async listenForEventsToFrontend(roomId, callback) {
         await this.ensureInitialized();
-        
+
         // Sử dụng module lắng nghe sự kiện độc lập
         return eventListener.listenForEventsToFrontend(
-            roomId, 
-            auth.userAddress, 
+            roomId,
+            auth.userAddress,
             callback
         );
     }
@@ -568,12 +582,11 @@ class SmartContractConnector {
             // Compress track request data
             const pullData = {
                 sessionId: sessionId,
-                tracks: [{
-                    trackName: trackName,
-                    location: "remote",
-                    sessionId: remoteSessionId // Make sure to include remote session ID
-                }]
+                remoteSessionId: remoteSessionId,
+                trackName: trackName,
+                timestamp: Date.now()
             };
+
             const compressedData = this.compressData(pullData);
 
             // Create event data
@@ -585,17 +598,19 @@ class SmartContractConnector {
                 timestamp: Date.now()
             }));
 
-            // Estimate gas for the transaction
+            // Calculate gas limit
             const gasLimit = await this.contract.estimateGas.forwardEventToBackend(roomId, eventData);
+            console.log("Estimated gas limit for pull tracks:", gasLimit.toString());
 
-            // Send to smart contract with buffer on gas limit
+            // Send to smart contract
             const tx = await this.contract.forwardEventToBackend(roomId, eventData, {
-                gasLimit: gasLimit.add(100000)
+                gasLimit: gasLimit.add(100000) // Add buffer to estimated gas limit
             });
-            await tx.wait();
 
-            console.log("Track pull request sent to smart contract");
-            return { success: true };
+            await tx.wait();
+            console.log("Pull track request sent to smart contract");
+
+            return { success: true, roomId, sessionId };
         } catch (error) {
             console.error("Failed to pull tracks:", error);
             throw error;
