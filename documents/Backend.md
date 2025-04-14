@@ -308,10 +308,20 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A[Nhận dữ liệu từ smart contract] --> B{Kiểm tra định dạng}
-    B -->|"Bắt đầu với 'zlib:'"| C[Trích xuất phần base64]
+    A[Nhận dữ liệu từ smart contract] --> B{Kiểm tra định dạng}    B -->|"Bắt đầu với 'zlib:'"| C[Trích xuất phần base64]
     C --> D[Giải mã base64]
     D --> E[Giải nén zlib]
+    E --> I[Trả về dữ liệu giải nén]
+    
+    B -->|"Dữ liệu zlib trực tiếp"| F[Tạo zlib reader]
+    F --> G[Đọc dữ liệu]
+    G --> I
+    
+    B -->|"Dữ liệu JSON"| H[Kiểm tra trường compressedData]
+    H --> C
+    
+    B -->|"Định dạng khác"| J[Trả về nguyên bản]
+```
     B -->|Dữ liệu bytes| F[Thử giải nén trực tiếp với zlib]
     F -->|Thành công| G[Trả về dữ liệu giải nén]
     F -->|Thất bại| H[Thử parse JSON]
