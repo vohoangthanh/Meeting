@@ -308,27 +308,41 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A[Nhận dữ liệu từ smart contract] --> B{Kiểm tra định dạng}    B -->|"Bắt đầu với 'zlib:'"| C[Trích xuất phần base64]
+    A[Nhận dữ liệu từ smart contract] --> B{Kiểm tra định dạng}
+
+    B --> B1["Bắt đầu với 'zlib:'"]
+    B1 --> C[Trích xuất phần base64]
     C --> D[Giải mã base64]
     D --> E[Giải nén zlib]
-    E --> I[Trả về dữ liệu giải nén]
-    
-    B -->|"Dữ liệu zlib trực tiếp"| F[Tạo zlib reader]
-    F --> G[Đọc dữ liệu]
-    G --> I
-    
-    B -->|"Dữ liệu JSON"| H[Kiểm tra trường compressedData]
-    H --> C
-    
-    B -->|"Định dạng khác"| J[Trả về nguyên bản]
-```
-    B -->|Dữ liệu bytes| F[Thử giải nén trực tiếp với zlib]
-    F -->|Thành công| G[Trả về dữ liệu giải nén]
-    F -->|Thất bại| H[Thử parse JSON]
-    H -->|Thành công và có compressedData| I[Trích xuất và giải nén]
-    H -->|Không thể parse| J[Trả về nguyên dạng]
     E --> K[Trả về dữ liệu giải nén]
-    I --> K
+
+    B --> B2["Dữ liệu zlib trực tiếp"]
+    B2 --> F[Tạo zlib reader]
+    F --> G[Đọc dữ liệu]
+    G --> K
+
+    B --> B3["Dữ liệu JSON"]
+    B3 --> H[Kiểm tra trường compressedData]
+    H --> C
+
+    B --> B4["Định dạng khác"]
+    B4 --> J[Trả về nguyên bản]
+
+    %% Phần mở rộng với bytes
+    B --> B5["Dữ liệu bytes"]
+    B5 --> F2[Thử giải nén trực tiếp với zlib]
+    F2 --> F2a["Thành công"]
+    F2a --> G2[Trả về dữ liệu giải nén]
+    G2 --> K
+
+    F2 --> F2b["Thất bại"]
+    F2b --> H2[Thử parse JSON]
+    H2 --> H2a["Thành công và có compressedData"]
+    H2a --> I2[Trích xuất và giải nén]
+    I2 --> K
+
+    H2 --> H2b["Không thể parse"]
+    H2b --> J2[Trả về nguyên dạng]
 ```
 
 ## Luồng xử lý hoàn chỉnh
